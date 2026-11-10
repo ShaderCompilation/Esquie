@@ -57,6 +57,7 @@ Terminal=false
 Categories=AudioVideo;Audio;Utility;
 Keywords=noise;microphone;mic;suppression;denoise;
 StartupNotify=false
+StartupWMClass=esquie
 EOF
 
 # If "Start on login" was enabled from a dev build, point it at the installed binary.

@@ -19,6 +19,10 @@ fn main() -> anyhow::Result<()> {
     let shared = Arc::new(Shared::new(initial.enabled, strength_to_db(initial.strength)));
 
     let ui = AppWindow::new()?;
+    // Must match the .desktop file name so GNOME can link the window to the
+    // launcher; otherwise it shows a busy cursor until its startup timeout.
+    // Has to run after the platform exists (AppWindow::new) but before show().
+    slint::set_xdg_app_id("esquie")?;
     ui.set_enabled(initial.enabled);
     ui.set_strength(initial.strength);
     ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
