@@ -5,13 +5,11 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use audio::{Command, Event, Shared};
+use audio::{Command, Event, PreviewMode, Shared};
 use settings::{strength_to_db, Settings};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
-
-const READY: &str = "Pick \"Esquie (noise removed)\" as the microphone in your apps.";
 
 fn main() -> anyhow::Result<()> {
     let settings = Arc::new(Mutex::new(Settings::load()));
@@ -21,6 +19,7 @@ fn main() -> anyhow::Result<()> {
     let ui = AppWindow::new()?;
     ui.set_enabled(initial.enabled);
     ui.set_strength(initial.strength);
+    ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
 
     // Audio thread (PipeWire + DeepFilterNet).
     let (cmd_tx, cmd_rx) = pipewire::channel::channel::<Command>();
@@ -36,7 +35,7 @@ fn main() -> anyhow::Result<()> {
             if let Err(e) = audio::run(shared, mic, cmd_rx, notify) {
                 let msg = format!("Audio engine failed: {e:#}");
                 eprintln!("{msg}");
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_status(msg.into()));
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_error(msg.into()));
             }
         })?
     };
@@ -48,8 +47,9 @@ fn main() -> anyhow::Result<()> {
         ui.on_mic_selected(move |i| {
             let Some(ui) = ui_weak.upgrade() else { return };
             if let Some(name) = ui.get_mic_names().row_data(i as usize).map(|n| n.to_string()) {
-                settings.lock().unwrap().mic = Some(name.clone());
-                settings.lock().unwrap().save();
+                let mut s = settings.lock().unwrap();
+                s.mic = Some(name.clone());
+                s.save();
                 let _ = tx.send(Command::SelectMic(name));
             }
         });
@@ -74,8 +74,22 @@ fn main() -> anyhow::Result<()> {
             s.save();
         });
     }
+    {
+        let shared = shared.clone();
+        ui.on_play_cleaned_changed(move |on| shared.play_cleaned.store(on, Ordering::Relaxed));
+    }
+    let send = |cmd: fn() -> Command| {
+        let tx = cmd_tx.clone();
+        move || {
+            let _ = tx.send(cmd());
+        }
+    };
+    ui.on_record(send(|| Command::Record));
+    ui.on_play(send(|| Command::Play));
+    ui.on_monitor(send(|| Command::Monitor));
+    ui.on_stop_test(send(|| Command::Stop));
 
-    // Level meters, ~30 fps with a gentle fall-off.
+    // Meters and test progress, ~30 fps. Meters fall off gently.
     let meter_timer = slint::Timer::default();
     {
         let ui_weak = ui.as_weak();
@@ -85,6 +99,15 @@ fn main() -> anyhow::Result<()> {
             let (i, o) = shared.take_levels();
             ui.set_in_level(to_meter(i).max(ui.get_in_level() * 0.85));
             ui.set_out_level(to_meter(o).max(ui.get_out_level() * 0.85));
+            let (mode, clip, pos) = shared.preview();
+            ui.set_test_mode(match mode {
+                PreviewMode::Idle => TestMode::Idle,
+                PreviewMode::Recording => TestMode::Recording,
+                PreviewMode::Playing => TestMode::Playing,
+                PreviewMode::Monitoring => TestMode::Monitoring,
+            });
+            ui.set_clip_length(clip);
+            ui.set_clip_pos(pos);
         });
     }
 
@@ -99,17 +122,19 @@ fn apply_event(ui: &AppWindow, event: Event) {
     match event {
         Event::Mics { list, active } => {
             let labels: Vec<SharedString> = list.iter().map(|m| m.description.as_str().into()).collect();
+            let names: Vec<SharedString> = list.iter().map(|m| m.name.as_str().into()).collect();
             let index = active
                 .as_ref()
                 .and_then(|a| list.iter().position(|m| &m.name == a))
                 .map_or(-1, |i| i as i32);
-            let names: Vec<SharedString> = list.iter().map(|m| m.name.as_str().into()).collect();
             ui.set_mic_names(ModelRc::new(VecModel::from(names)));
             ui.set_mics(ModelRc::new(VecModel::from(labels)));
             ui.set_mic_index(index);
-            ui.set_status(if list.is_empty() { "No microphone found." } else { READY }.into());
+            ui.set_ready(true);
+            ui.set_error(SharedString::new());
         }
-        Event::Error(msg) => ui.set_status(msg.into()),
+        Event::Users(users) => ui.set_users(users.join(", ").into()),
+        Event::Error(msg) => ui.set_error(msg.into()),
     }
 }
 

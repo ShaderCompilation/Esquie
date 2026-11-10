@@ -1,9 +1,267 @@
-import { ComboBox, Switch, Slider, ProgressIndicator, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+import { ComboBox, Slider, Palette } from "std-widgets.slint";
 
+export enum TestMode { idle, recording, playing, monitoring }
+
+// ── Design tokens (follow the system light/dark preference) ─────────────────
+global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> bg: dark ? #0e1015 : #f2f3f7;
+    out property <color> surface: dark ? #171a21 : #ffffff;
+    out property <color> surface-2: dark ? #21252e : #eceef3;
+    out property <color> border: dark ? #272c37 : #e1e4ea;
+    out property <color> text: dark ? #eceef3 : #15171c;
+    out property <color> text-dim: dark ? #8b93a3 : #646c7b;
+    out property <color> accent: dark ? #6b8dff : #3563f0;
+    out property <color> good: dark ? #3dd598 : #14a06b;
+    out property <color> warn: dark ? #f4b44a : #c07a00;
+    out property <color> bad: dark ? #ff6b6b : #d93636;
+    out property <length> radius: 16px;
+}
+
+// ── Building blocks ─────────────────────────────────────────────────────────
+component Icon inherits Path {
+    in property <string> icon;
+    in property <color> color: Theme.text;
+    in property <bool> filled: false;
+    width: 18px;
+    height: 18px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: filled ? transparent : color;
+    stroke-width: 2px;
+    stroke-line-cap: round;
+    fill: filled ? color : transparent;
+    commands: icon == "mic" ? "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z M19 10v2a7 7 0 0 1-14 0v-2 M12 19v3"
+        : icon == "power" ? "M12 2v10 M18.4 6.6a9 9 0 1 1-12.77.04"
+        : icon == "headphones" ? "M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"
+        : icon == "play" ? "M7 4.5v15l13-7.5z"
+        : icon == "stop" ? "M6 6h12v12H6z"
+        : icon == "record" ? "M5 12a7 7 0 1 0 14 0a7 7 0 1 0 -14 0z"
+        : icon == "replay" ? "M3 12a9 9 0 1 0 3-6.7L3 8 M3 3v5h5"
+        : "";
+}
+
+component Card inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+        if root.title != "": VerticalLayout {
+            spacing: 2px;
+            Text { text: root.title; font-size: 15px; font-weight: 700; color: Theme.text; }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: 12px;
+                color: Theme.text-dim;
+                wrap: word-wrap;
+            }
+        }
+        @children
+    }
+}
+
+component Button inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> icon-filled;
+    in property <bool> primary;
+    in property <color> tint: Theme.accent;
+    in property <bool> enabled: true;
+    callback clicked;
+    property <color> fg: primary ? #ffffff : Theme.text;
+    min-height: 40px;
+    min-width: 40px;
+    border-radius: 11px;
+    border-width: primary ? 0 : 1px;
+    border-color: Theme.border;
+    opacity: enabled ? 1 : 0.45;
+    background: primary
+        ? (ta.pressed ? tint.darker(0.15) : ta.has-hover ? tint.brighter(0.08) : tint)
+        : (ta.pressed ? Theme.surface-2.darker(0.06) : ta.has-hover ? Theme.surface-2 : Theme.surface);
+    animate background { duration: 120ms; }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        alignment: center;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Icon { icon: root.icon; color: root.fg; filled: root.icon-filled; width: 16px; height: 16px; }
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: root.fg;
+            font-weight: 600;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component PowerButton inherits Rectangle {
+    in-out property <bool> on;
+    callback toggled(bool);
+    width: 88px;
+    height: 88px;
+    border-radius: self.width / 2;
+    background: on ? (ta.pressed ? Theme.accent.darker(0.15) : Theme.accent) : (ta.has-hover ? Theme.surface-2.darker(0.05) : Theme.surface-2);
+    border-width: on ? 0 : 1px;
+    border-color: Theme.border;
+    drop-shadow-blur: on ? 28px : 0;
+    drop-shadow-color: Theme.accent.transparentize(0.45);
+    animate background, drop-shadow-blur { duration: 220ms; easing: ease-out; }
+    Icon {
+        icon: "power";
+        width: 36px;
+        height: 36px;
+        stroke-width: 2.5px;
+        color: root.on ? #ffffff : Theme.text-dim;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.on = !root.on;
+            root.toggled(root.on);
+        }
+    }
+}
+
+component Meter inherits HorizontalLayout {
+    in property <float> level;
+    in property <color> color: Theme.good;
+    property <int> count: 30;
+    spacing: 3px;
+    for i in count: Rectangle {
+        height: 10px;
+        border-radius: 2px;
+        background: (i + 0.5) / root.count > root.level ? Theme.surface-2
+            : i >= root.count - 3 ? Theme.bad
+            : i >= root.count - 8 ? Theme.warn
+            : root.color;
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 32px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    background: selected ? Theme.accent.transparentize(0.88) : ta.has-hover ? Theme.surface-2 : transparent;
+    opacity: enabled ? 1 : 0.45;
+    animate background, border-color { duration: 120ms; }
+    Text {
+        text: root.text;
+        font-size: 13px;
+        font-weight: root.selected ? 700 : 500;
+        color: root.selected ? Theme.accent : Theme.text;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Segmented inherits Rectangle {
+    in property <[string]> items;
+    in-out property <int> index;
+    callback changed(int);
+    height: 36px;
+    border-radius: 11px;
+    background: Theme.surface-2;
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 3px;
+        for item[i] in root.items: Rectangle {
+            border-radius: 8px;
+            background: i == root.index ? Theme.surface : transparent;
+            drop-shadow-blur: i == root.index ? 4px : 0;
+            drop-shadow-color: #0000002a;
+            animate background { duration: 120ms; }
+            Text {
+                text: item;
+                font-size: 13px;
+                font-weight: 600;
+                color: i == root.index ? Theme.text : Theme.text-dim;
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.index = i;
+                    root.changed(i);
+                }
+            }
+        }
+    }
+}
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> tint;
+    height: 28px;
+    border-radius: 14px;
+    background: tint.transparentize(0.86);
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 12px;
+        spacing: 7px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.tint; }
+        }
+        Text {
+            text: root.text;
+            color: root.tint;
+            font-size: 12px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Progress inherits Rectangle {
+    in property <float> value; // 0..1
+    in property <color> tint: Theme.accent;
+    height: 6px;
+    border-radius: 3px;
+    background: Theme.surface-2;
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(root.value, 0, 1);
+        height: parent.height;
+        border-radius: parent.border-radius;
+        background: root.tint;
+    }
+}
+
+component Label inherits Text {
+    font-size: 12px;
+    font-weight: 600;
+    color: Theme.text-dim;
+}
+
+// ── Window ──────────────────────────────────────────────────────────────────
 export component AppWindow inherits Window {
     title: "Esquie";
-    preferred-width: 380px;
-    min-width: 320px;
+    icon: @image-url("icon.svg");
+    preferred-width: 460px;
+    min-width: 400px;
+    background: Theme.bg;
+    default-font-size: 14px;
 
     in property <[string]> mics;
     in property <[string]> mic-names; // PipeWire node names, same order as `mics`
@@ -12,77 +270,362 @@ export component AppWindow inherits Window {
     in-out property <float> strength: 100;
     in property <float> in-level;
     in property <float> out-level;
-    in property <string> status: "Starting…";
+    in property <bool> ready;
+    in property <string> error;
+    in property <string> users; // apps using the virtual mic, comma separated
+    in property <TestMode> test-mode;
+    in property <float> clip-length; // seconds
+    in property <float> clip-pos;    // seconds
+    in property <float> clip-max: 10;
+    in-out property <bool> play-cleaned: true;
 
     callback mic-selected(int);
     callback enabled-changed(bool);
     callback strength-changed(float);
+    callback record();
+    callback play();
+    callback monitor();
+    callback stop-test();
+    callback play-cleaned-changed(bool);
 
-    VerticalBox {
-        spacing: 12px;
+    private property <bool> has-mic: root.mics.length > 0;
+    private property <bool> in-use: root.users != "";
 
-        Text {
-            text: "Esquie";
-            font-size: 20px;
-            font-weight: 700;
-        }
+    pure function seconds(s: float) -> string {
+        "0:" + (s < 9.5 ? "0" : "") + Math.round(s)
+    }
 
-        GroupBox {
-            title: "Microphone";
-            ComboBox {
-                model: root.mics;
-                current-index <=> root.mic-index;
-                selected => { root.mic-selected(self.current-index); }
+    function set-strength(v: float) {
+        root.strength = v;
+        root.strength-changed(v);
+    }
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 14px;
+        alignment: start;
+
+        // Header
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 42px;
+                height: 42px;
+                border-radius: 13px;
+                background: @linear-gradient(135deg, #7b8cff 0%, #8f5cf6 100%);
+                Icon { icon: "mic"; color: #ffffff; width: 22px; height: 22px; }
             }
-        }
-
-        HorizontalBox {
-            padding: 0;
-            Text {
-                text: "Noise removal";
-                vertical-alignment: center;
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
                 horizontal-stretch: 1;
+                Text { text: "Esquie"; font-size: 19px; font-weight: 800; color: Theme.text; }
+                Text { text: "Noise removal for your microphone"; font-size: 12px; color: Theme.text-dim; }
             }
-            Switch {
-                checked <=> root.enabled;
-                toggled => { root.enabled-changed(self.checked); }
-            }
-        }
-
-        VerticalBox {
-            padding: 0;
-            spacing: 4px;
-            HorizontalBox {
-                padding: 0;
-                Text { text: "Strength"; horizontal-stretch: 1; }
-                Text { text: root.strength >= 100 ? "Max" : round(root.strength) + "%"; }
-            }
-            Slider {
-                minimum: 0;
-                maximum: 100;
-                value <=> root.strength;
-                enabled: root.enabled;
-                changed(v) => { root.strength-changed(v); }
+            VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: root.error != "" ? "Error"
+                        : !root.ready ? "Starting…"
+                        : !root.has-mic ? "No microphone"
+                        : !root.enabled ? "Bypassed"
+                        : "Active";
+                    tint: root.error != "" || (root.ready && !root.has-mic) ? Theme.bad
+                        : !root.ready || !root.enabled ? Theme.warn
+                        : Theme.good;
+                }
             }
         }
 
-        GridLayout {
-            spacing: 8px;
-            Row {
-                Text { text: "Input"; vertical-alignment: center; }
-                ProgressIndicator { progress: root.in-level; }
-            }
-            Row {
-                Text { text: "Output"; vertical-alignment: center; }
-                ProgressIndicator { progress: root.out-level; }
+        if root.error != "": Rectangle {
+            border-radius: 12px;
+            background: Theme.bad.transparentize(0.88);
+            border-width: 1px;
+            border-color: Theme.bad.transparentize(0.6);
+            HorizontalLayout {
+                padding: 12px;
+                Text { text: root.error; color: Theme.bad; wrap: word-wrap; font-size: 13px; }
             }
         }
 
-        Text {
-            text: root.status;
-            wrap: word-wrap;
-            font-size: 12px;
-            opacity: 0.75;
+        // Main switch + meters
+        Card {
+            HorizontalLayout {
+                spacing: 20px;
+                VerticalLayout {
+                    alignment: center;
+                    PowerButton {
+                        on <=> root.enabled;
+                        toggled(on) => { root.enabled-changed(on); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 6px;
+                    Text {
+                        text: root.enabled ? "Noise removal is on" : "Noise removal is off";
+                        font-size: 17px;
+                        font-weight: 700;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: root.enabled
+                            ? "Background noise is removed before your voice reaches your apps."
+                            : "Your microphone passes through unchanged. Click to turn on.";
+                        font-size: 12px;
+                        color: Theme.text-dim;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            GridLayout {
+                spacing-horizontal: 12px;
+                spacing-vertical: 10px;
+                Row {
+                    Label { text: "Mic"; vertical-alignment: center; }
+                    Meter { level: root.in-level; color: Theme.text-dim; }
+                }
+                Row {
+                    Label { text: "Output"; vertical-alignment: center; }
+                    Meter { level: root.out-level; color: root.enabled ? Theme.good : Theme.text-dim; }
+                }
+            }
         }
+
+        // Settings
+        Card {
+            VerticalLayout {
+                spacing: 8px;
+                Label { text: "MICROPHONE"; }
+                ComboBox {
+                    model: root.mics;
+                    enabled: root.has-mic;
+                    current-index <=> root.mic-index;
+                    selected => { root.mic-selected(self.current-index); }
+                }
+            }
+            VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    Label { text: "STRENGTH"; horizontal-stretch: 1; }
+                    Text {
+                        text: root.strength >= 99.5 ? "Maximum" : Math.round(root.strength) + "%";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: root.enabled ? Theme.accent : Theme.text-dim;
+                    }
+                }
+                Slider {
+                    minimum: 0;
+                    maximum: 100;
+                    value <=> root.strength;
+                    enabled: root.enabled;
+                    changed(v) => { root.strength-changed(v); }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Chip {
+                        text: "Natural";
+                        enabled: root.enabled;
+                        selected: Math.abs(root.strength - 30) < 0.5;
+                        clicked => { root.set-strength(30); }
+                    }
+                    Chip {
+                        text: "Balanced";
+                        enabled: root.enabled;
+                        selected: Math.abs(root.strength - 65) < 0.5;
+                        clicked => { root.set-strength(65); }
+                    }
+                    Chip {
+                        text: "Maximum";
+                        enabled: root.enabled;
+                        selected: root.strength >= 99.5;
+                        clicked => { root.set-strength(100); }
+                    }
+                }
+                Text {
+                    text: "Lower strength keeps some room sound and can sound more natural.";
+                    font-size: 11px;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Test
+        Card {
+            title: "Test how you sound";
+            subtitle: "Record a few seconds, then compare the original and the cleaned version.";
+
+            if root.test-mode == TestMode.recording: VerticalLayout {
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 12px;
+                            height: 12px;
+                            border-radius: 6px;
+                            background: Theme.bad;
+                            opacity: 0.6 + 0.4 * Math.sin(animation-tick() / 1s * 300deg);
+                        }
+                    }
+                    Text {
+                        text: "Recording… speak normally";
+                        font-weight: 600;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.seconds(root.clip-length) + " / " + root.seconds(root.clip-max);
+                        font-size: 12px;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: "Stop";
+                        icon: "stop";
+                        icon-filled: true;
+                        primary: true;
+                        tint: Theme.bad;
+                        clicked => { root.stop-test(); }
+                    }
+                }
+                Progress { value: root.clip-length / root.clip-max; tint: Theme.bad; }
+            }
+
+            if root.test-mode != TestMode.recording: HorizontalLayout {
+                spacing: 10px;
+                Button {
+                    text: root.clip-length > 0 ? "Record again" : "Record a sample";
+                    icon: "record";
+                    icon-filled: true;
+                    primary: root.clip-length == 0;
+                    tint: Theme.bad;
+                    enabled: root.has-mic;
+                    horizontal-stretch: 1;
+                    clicked => { root.record(); }
+                }
+                Button {
+                    text: root.test-mode == TestMode.monitoring ? "Stop listening" : "Listen live";
+                    icon: root.test-mode == TestMode.monitoring ? "stop" : "headphones";
+                    icon-filled: root.test-mode == TestMode.monitoring;
+                    primary: root.test-mode == TestMode.monitoring;
+                    enabled: root.has-mic;
+                    horizontal-stretch: 1;
+                    clicked => {
+                        if root.test-mode == TestMode.monitoring {
+                            root.stop-test();
+                        } else {
+                            root.monitor();
+                        }
+                    }
+                }
+            }
+
+            if root.test-mode == TestMode.monitoring: Rectangle {
+                border-radius: 10px;
+                background: Theme.warn.transparentize(0.88);
+                HorizontalLayout {
+                    padding: 10px;
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon { icon: "headphones"; color: Theme.warn; width: 16px; height: 16px; }
+                    }
+                    Text {
+                        text: "Use headphones to avoid echo. Flip the power button to hear the difference.";
+                        font-size: 12px;
+                        color: Theme.text;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            if root.clip-length > 0 && root.test-mode != TestMode.recording: VerticalLayout {
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Segmented {
+                        items: ["Original", "Cleaned"];
+                        index: root.play-cleaned ? 1 : 0;
+                        horizontal-stretch: 1;
+                        changed(i) => {
+                            root.play-cleaned = i == 1;
+                            root.play-cleaned-changed(i == 1);
+                        }
+                    }
+                    Button {
+                        width: 96px;
+                        text: root.test-mode == TestMode.playing ? "Stop" : "Play";
+                        icon: root.test-mode == TestMode.playing ? "stop" : "play";
+                        icon-filled: true;
+                        primary: true;
+                        clicked => {
+                            if root.test-mode == TestMode.playing {
+                                root.stop-test();
+                            } else {
+                                root.play();
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Progress {
+                            value: root.test-mode == TestMode.playing ? root.clip-pos / root.clip-length : 0;
+                        }
+                    }
+                    Text {
+                        text: (root.test-mode == TestMode.playing ? root.seconds(root.clip-pos) + " / " : "")
+                            + root.seconds(root.clip-length);
+                        font-size: 12px;
+                        color: Theme.text-dim;
+                    }
+                }
+                Text {
+                    text: "Switch while it plays. The strength setting applies to the cleaned version.";
+                    font-size: 11px;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Where to use it
+        Rectangle {
+            border-radius: 12px;
+            background: root.in-use ? Theme.good.transparentize(0.9) : Theme.surface-2;
+            HorizontalLayout {
+                padding: 12px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.in-use ? Theme.good : Theme.text-dim;
+                    }
+                }
+                Text {
+                    text: root.in-use
+                        ? "In use by " + root.users
+                        : "In your apps, choose “Esquie (noise removed)” as the microphone.";
+                    font-size: 12px;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
     }
 }

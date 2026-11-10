@@ -4,11 +4,12 @@
 //! Everything here runs on one PipeWire main-loop thread (no RT_PROCESS), so
 //! the two streams can share the engine through a plain Rc<RefCell<..>>.
 
-use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use df::tract::{DfParams, DfTract, RuntimeParams};
@@ -21,23 +22,56 @@ use pw::stream::{StreamFlags, StreamListener, StreamRc};
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const VIRTUAL_NODE_NAME: &str = "esquie";
 const MAX_QUEUE: usize = SAMPLE_RATE as usize / 5; // 200 ms: beyond this we drop old audio
+pub const MAX_CLIP_SECS: u32 = 10;
+const MAX_CLIP: usize = (SAMPLE_RATE * MAX_CLIP_SECS) as usize;
+const MIN_CLIP: usize = SAMPLE_RATE as usize / 2; // shorter recordings are discarded
+
+/// What the "Test" section is doing. Only one at a time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum PreviewMode {
+    Idle = 0,
+    Recording = 1,
+    Playing = 2,
+    Monitoring = 3,
+}
 
 /// Values the UI writes and the audio thread reads (and levels the other way).
 pub struct Shared {
     pub enabled: AtomicBool,
+    /// During sample playback: play the cleaned version (true) or the original.
+    pub play_cleaned: AtomicBool,
     atten_db: AtomicU32,
     in_level: AtomicU32,
     out_level: AtomicU32,
+    preview_mode: AtomicU8,
+    clip_len: AtomicUsize,
+    play_pos: AtomicUsize,
 }
 
 impl Shared {
     pub fn new(enabled: bool, atten_db: f32) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
+            play_cleaned: AtomicBool::new(true),
             atten_db: AtomicU32::new(atten_db.to_bits()),
             in_level: AtomicU32::new(0),
             out_level: AtomicU32::new(0),
+            preview_mode: AtomicU8::new(PreviewMode::Idle as u8),
+            clip_len: AtomicUsize::new(0),
+            play_pos: AtomicUsize::new(0),
         }
+    }
+    /// Current test mode, recorded clip length and playback position (seconds).
+    pub fn preview(&self) -> (PreviewMode, f32, f32) {
+        let mode = match self.preview_mode.load(Ordering::Relaxed) {
+            1 => PreviewMode::Recording,
+            2 => PreviewMode::Playing,
+            3 => PreviewMode::Monitoring,
+            _ => PreviewMode::Idle,
+        };
+        let secs = |n: usize| n as f32 / SAMPLE_RATE as f32;
+        (mode, secs(self.clip_len.load(Ordering::Relaxed)), secs(self.play_pos.load(Ordering::Relaxed)))
     }
     pub fn set_atten_db(&self, db: f32) {
         self.atten_db.store(db.to_bits(), Ordering::Relaxed);
@@ -68,12 +102,22 @@ pub struct Mic {
 
 pub enum Command {
     SelectMic(String),
+    /// Record a short sample of the raw mic.
+    Record,
+    /// Play the recorded sample (original or cleaned, see `Shared::play_cleaned`).
+    Play,
+    /// Play the live output to the speakers/headphones.
+    Monitor,
+    /// Stop the current test. Stopping a recording plays it back.
+    Stop,
     Quit,
 }
 
 /// Events sent from the audio thread to the UI.
 pub enum Event {
     Mics { list: Vec<Mic>, active: Option<String> },
+    /// Apps currently reading the virtual mic.
+    Users(Vec<String>),
     Error(String),
 }
 
@@ -86,15 +130,114 @@ struct Engine {
     queue: VecDeque<f32>,
     primed: bool,
     shared: Arc<Shared>,
+    preview: Preview,
+}
+
+/// Test playback: a second model instance so a recorded sample can be heard
+/// both raw and cleaned (with the current strength) without touching the live mic.
+struct Preview {
+    df: DfTract,
+    atten_db: f32,
+    mode: PreviewMode,
+    clip: Vec<f32>,
+    pos: usize,
+    queue: VecDeque<f32>,
+    primed: bool,
+    frame: Vec<f32>,
+    /// Recording hit the length limit, or playback reached the end.
+    finished: bool,
+}
+
+fn load_model(atten_db: f32) -> Result<DfTract> {
+    let params = RuntimeParams::default_with_ch(1).with_atten_lim(atten_db);
+    let df = DfTract::new(DfParams::default(), &params).context("loading DeepFilterNet model")?;
+    anyhow::ensure!(df.sr == SAMPLE_RATE as usize, "model sample rate is {}", df.sr);
+    Ok(df)
+}
+
+/// Pops `out.len()` samples once the queue holds a small cushion, else silence.
+/// Returns false on underrun.
+fn pull(queue: &mut VecDeque<f32>, primed: &mut bool, out: &mut [f32], hop: usize) -> bool {
+    if !*primed && queue.len() >= out.len() + hop {
+        *primed = true;
+    }
+    if !*primed || queue.len() < out.len() {
+        let underrun = *primed;
+        *primed = false;
+        out.fill(0.0);
+        return !underrun;
+    }
+    let n = out.len();
+    for (o, s) in out.iter_mut().zip(queue.drain(..n)) {
+        *o = s;
+    }
+    true
+}
+
+impl Preview {
+    fn set_mode(&mut self, mode: PreviewMode, shared: &Shared) {
+        self.mode = mode;
+        self.finished = false;
+        self.queue.clear();
+        self.primed = false;
+        shared.preview_mode.store(mode as u8, Ordering::Relaxed);
+    }
+
+    /// Fill the preview (speaker) stream.
+    fn fill(&mut self, out: &mut [f32], shared: &Shared, hop: usize) {
+        match self.mode {
+            PreviewMode::Monitoring => {
+                pull(&mut self.queue, &mut self.primed, out, hop);
+            }
+            PreviewMode::Playing => {
+                let db = shared.atten_db();
+                if db != self.atten_db {
+                    self.atten_db = db;
+                    self.df.set_atten_lim(db);
+                }
+                let cleaned = shared.play_cleaned.load(Ordering::Relaxed);
+                while self.queue.len() < out.len() && self.pos + hop <= self.clip.len() {
+                    let frame = &self.clip[self.pos..self.pos + hop];
+                    // Always run the model so switching to "cleaned" mid-play is seamless.
+                    let noisy = ArrayView2::from_shape((1, hop), frame).unwrap();
+                    let enh = ArrayViewMut2::from_shape((1, hop), &mut self.frame[..]).unwrap();
+                    if self.df.process(noisy, enh).is_err() {
+                        self.frame.copy_from_slice(frame);
+                    }
+                    self.queue.extend(if cleaned { &self.frame[..] } else { frame }.iter().copied());
+                    self.pos += hop;
+                }
+                shared.play_pos.store(self.pos, Ordering::Relaxed);
+                let n = self.queue.len().min(out.len());
+                for (o, s) in out.iter_mut().zip(self.queue.drain(..n)) {
+                    *o = s;
+                }
+                out[n..].fill(0.0);
+                if n < out.len() {
+                    self.finished = true;
+                }
+            }
+            PreviewMode::Idle | PreviewMode::Recording => out.fill(0.0),
+        }
+    }
 }
 
 impl Engine {
     fn new(shared: Arc<Shared>) -> Result<Self> {
         let atten_db = shared.atten_db();
-        let params = RuntimeParams::default_with_ch(1).with_atten_lim(atten_db);
-        let df = DfTract::new(DfParams::default(), &params).context("loading DeepFilterNet model")?;
-        anyhow::ensure!(df.sr == SAMPLE_RATE as usize, "model sample rate is {}", df.sr);
+        let df = load_model(atten_db)?;
         let hop = df.hop_size;
+        let preview = Preview {
+            df: load_model(atten_db)?,
+            atten_db,
+            mode: PreviewMode::Idle,
+            clip: Vec::with_capacity(MAX_CLIP),
+            pos: 0,
+            queue: VecDeque::with_capacity(MAX_QUEUE * 2),
+            primed: false,
+            frame: vec![0.0; hop],
+            finished: false,
+        };
         Ok(Self {
             df,
             hop,
@@ -104,6 +247,7 @@ impl Engine {
             queue: VecDeque::with_capacity(MAX_QUEUE * 2),
             primed: false,
             shared,
+            preview,
         })
     }
 
@@ -111,6 +255,14 @@ impl Engine {
     fn push_input(&mut self, samples: &[f32]) {
         Shared::bump(&self.shared.in_level, samples);
         self.input.extend_from_slice(samples);
+
+        let p = &mut self.preview;
+        if p.mode == PreviewMode::Recording && !p.finished {
+            let room = MAX_CLIP - p.clip.len();
+            p.clip.extend_from_slice(&samples[..samples.len().min(room)]);
+            self.shared.clip_len.store(p.clip.len(), Ordering::Relaxed);
+            p.finished = p.clip.len() >= MAX_CLIP;
+        }
 
         let db = self.shared.atten_db();
         if db != self.atten_db {
@@ -133,9 +285,16 @@ impl Engine {
             }
             Shared::bump(&self.shared.out_level, &self.frame_out);
             self.queue.extend(self.frame_out.iter().copied());
+            if self.preview.mode == PreviewMode::Monitoring {
+                self.preview.queue.extend(self.frame_out.iter().copied());
+            }
             start += self.hop;
         }
         self.input.drain(..start);
+        if self.preview.queue.len() > MAX_QUEUE {
+            let excess = self.preview.queue.len() - self.hop * 4;
+            self.preview.queue.drain(..excess);
+        }
 
         // Nobody is reading the virtual mic (or clocks drift): don't let latency pile up.
         if self.queue.len() > MAX_QUEUE {
@@ -147,21 +306,30 @@ impl Engine {
     /// Fill `out` for the virtual mic. Waits for a small cushion before starting
     /// so that uneven callback timing doesn't cause crackles.
     fn pull_output(&mut self, out: &mut [f32]) {
-        let cushion = out.len() + self.hop;
-        if !self.primed && self.queue.len() >= cushion {
-            self.primed = true;
+        let have = self.queue.len();
+        if !pull(&mut self.queue, &mut self.primed, out, self.hop) && debug() {
+            eprintln!("underrun: want {} have {have}", out.len());
         }
-        if !self.primed || self.queue.len() < out.len() {
-            if self.primed && debug() {
-                eprintln!("underrun: want {} have {}", out.len(), self.queue.len());
-            }
-            self.primed = false;
-            out.fill(0.0);
-            return;
+    }
+
+    fn start_recording(&mut self) {
+        self.preview.clip.clear();
+        self.shared.clip_len.store(0, Ordering::Relaxed);
+        self.shared.play_pos.store(0, Ordering::Relaxed);
+        self.preview.set_mode(PreviewMode::Recording, &self.shared);
+    }
+
+    fn start_playing(&mut self) -> bool {
+        if self.preview.clip.len() < MIN_CLIP {
+            self.preview.clip.clear();
+            self.shared.clip_len.store(0, Ordering::Relaxed);
+            self.preview.set_mode(PreviewMode::Idle, &self.shared);
+            return false;
         }
-        for s in out.iter_mut() {
-            *s = self.queue.pop_front().unwrap_or(0.0);
-        }
+        self.preview.pos = 0;
+        self.shared.play_pos.store(0, Ordering::Relaxed);
+        self.preview.set_mode(PreviewMode::Playing, &self.shared);
+        true
     }
 }
 
@@ -202,10 +370,142 @@ struct State {
     preferred: RefCell<Option<String>>,      // mic the user picked (saved)
     system_default: RefCell<Option<String>>, // system default mic, used until the user picks one
     metadata: RefCell<Option<(pw::metadata::Metadata, pw::metadata::MetadataListener)>>,
+    /// Speaker stream for the test section; exists only while testing.
+    preview: RefCell<Option<(StreamRc, StreamListener<()>)>>,
+    /// Registry id of our virtual mic node.
+    virtual_id: Cell<Option<u32>>,
+    /// Recording streams (apps) by node id, with a display name.
+    apps: RefCell<HashMap<u32, String>>,
+    /// Links from our virtual mic: link id -> input node id.
+    links: RefCell<HashMap<u32, u32>>,
+    users: RefCell<Vec<String>>,
     notify: Box<dyn Fn(Event)>,
 }
 
 impl State {
+    fn send_users(&self) {
+        let apps = self.apps.borrow();
+        let mut users: Vec<String> =
+            self.links.borrow().values().filter_map(|n| apps.get(n).cloned()).collect();
+        users.sort();
+        users.dedup();
+        if *self.users.borrow() != users {
+            self.users.replace(users.clone());
+            (self.notify)(Event::Users(users));
+        }
+    }
+
+    fn ensure_preview_stream(&self) -> bool {
+        if self.preview.borrow().is_some() {
+            return true;
+        }
+        match self.make_preview() {
+            Ok(p) => {
+                self.preview.replace(Some(p));
+                true
+            }
+            Err(e) => {
+                (self.notify)(Event::Error(format!("Could not open speakers: {e:#}")));
+                false
+            }
+        }
+    }
+
+    fn make_preview(&self) -> Result<(StreamRc, StreamListener<()>)> {
+        let stream = StreamRc::new(
+            self.core.clone(),
+            "esquie-preview",
+            properties! {
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CATEGORY => "Playback",
+                *pw::keys::MEDIA_ROLE => "Communication",
+                *pw::keys::NODE_NAME => "esquie-preview",
+                *pw::keys::NODE_DESCRIPTION => "Esquie test playback",
+                "node.latency" => "480/48000",
+            },
+        )?;
+        let engine = self.engine.clone();
+        let listener = stream
+            .add_local_listener_with_user_data(())
+            .process(move |stream, _| {
+                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let requested = buffer.requested() as usize;
+                let datas = buffer.datas_mut();
+                let Some(data) = datas.first_mut() else { return };
+                let mut n = 0;
+                if let Some(bytes) = data.data() {
+                    let out = bytemuck_f32_mut(bytes);
+                    n = if requested > 0 { requested.min(out.len()) } else { out.len() };
+                    let mut e = engine.borrow_mut();
+                    let Engine { preview, shared, hop, .. } = &mut *e;
+                    preview.fill(&mut out[..n], shared, *hop);
+                }
+                let chunk = data.chunk_mut();
+                *chunk.offset_mut() = 0;
+                *chunk.stride_mut() = 4;
+                *chunk.size_mut() = (n * 4) as u32;
+            })
+            .register()?;
+        let params = mono_f32_params();
+        stream.connect(
+            spa::utils::Direction::Output,
+            None,
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
+        )?;
+        Ok((stream, listener))
+    }
+
+    fn stop_preview(&self) {
+        self.preview.replace(None);
+        let mut e = self.engine.borrow_mut();
+        let Engine { preview, shared, .. } = &mut *e;
+        preview.set_mode(PreviewMode::Idle, shared);
+    }
+
+    fn record(&self) {
+        self.preview.replace(None);
+        self.engine.borrow_mut().start_recording();
+    }
+
+    fn play(&self) {
+        if self.engine.borrow_mut().start_playing() && !self.ensure_preview_stream() {
+            self.stop_preview();
+        }
+    }
+
+    fn monitor(&self) {
+        {
+            let mut e = self.engine.borrow_mut();
+            let Engine { preview, shared, .. } = &mut *e;
+            preview.set_mode(PreviewMode::Monitoring, shared);
+        }
+        if !self.ensure_preview_stream() {
+            self.stop_preview();
+        }
+    }
+
+    fn stop(&self) {
+        if self.engine.borrow().preview.mode == PreviewMode::Recording {
+            self.play();
+        } else {
+            self.stop_preview();
+        }
+    }
+
+    /// Called periodically: ends recordings at the limit and finished playback.
+    fn tick(&self) {
+        let (mode, finished) = {
+            let e = self.engine.borrow();
+            (e.preview.mode, e.preview.finished)
+        };
+        match (mode, finished) {
+            (PreviewMode::Recording, true) => self.play(),
+            (PreviewMode::Playing, true) => self.stop_preview(),
+            _ => {}
+        }
+    }
+
     fn send_mics(&self) {
         (self.notify)(Event::Mics {
             list: self.mics.borrow().iter().map(|(_, m)| m.clone()).collect(),
@@ -406,6 +706,11 @@ pub fn run(
         preferred: RefCell::new(preferred_mic),
         system_default: RefCell::new(None),
         metadata: RefCell::new(None),
+        preview: RefCell::new(None),
+        virtual_id: Cell::new(None),
+        apps: RefCell::new(HashMap::new()),
+        links: RefCell::new(HashMap::new()),
+        users: RefCell::new(Vec::new()),
         notify: Box::new(notify),
     });
 
@@ -436,7 +741,27 @@ pub fn run(
                 st.metadata.replace(Some((metadata, listener)));
                 return;
             }
+            if obj.type_ == pw::types::ObjectType::Link {
+                let node = |k| props.get(k).and_then(|v| v.parse::<u32>().ok());
+                if let (Some(out), Some(input)) = (node("link.output.node"), node("link.input.node")) {
+                    if Some(out) == st.virtual_id.get() {
+                        st.links.borrow_mut().insert(obj.id, input);
+                        st.send_users();
+                    }
+                }
+                return;
+            }
             if obj.type_ != pw::types::ObjectType::Node {
+                return;
+            }
+            if props.get("media.class") == Some("Stream/Input/Audio") {
+                let app = props
+                    .get("application.name")
+                    .or(props.get("node.description"))
+                    .or(props.get("node.name"))
+                    .unwrap_or("An app");
+                st.apps.borrow_mut().insert(obj.id, app.to_string());
+                st.send_users();
                 return;
             }
             if props.get("media.class") != Some("Audio/Source") {
@@ -444,6 +769,7 @@ pub fn run(
             }
             let Some(name) = props.get("node.name") else { return };
             if name == VIRTUAL_NODE_NAME {
+                st.virtual_id.set(Some(obj.id));
                 return;
             }
             let description = props
@@ -453,7 +779,15 @@ pub fn run(
                 .to_string();
             st.on_mic_added(obj.id, Mic { name: name.to_string(), description });
         })
-        .global_remove(move |id| st2.on_global_removed(id))
+        .global_remove(move |id| {
+            let link = st2.links.borrow_mut().remove(&id).is_some();
+            let app = st2.apps.borrow_mut().remove(&id).is_some();
+            if link || app {
+                st2.send_users();
+            } else {
+                st2.on_global_removed(id);
+            }
+        })
         .register();
 
     let ml = mainloop.clone();
@@ -463,10 +797,19 @@ pub fn run(
             st.preferred.replace(Some(name.clone()));
             st.start_capture(&name);
         }
+        Command::Record => st.record(),
+        Command::Play => st.play(),
+        Command::Monitor => st.monitor(),
+        Command::Stop => st.stop(),
         Command::Quit => ml.quit(),
     });
 
+    let st = state.clone();
+    let ticker = mainloop.loop_().add_timer(move |_| st.tick());
+    ticker.update_timer(Some(Duration::from_millis(50)), Some(Duration::from_millis(50)));
+
     mainloop.run();
+    state.preview.replace(None);
     state.capture.replace(None);
     Ok(())
 }
