@@ -1,4 +1,4 @@
-import { ComboBox, Slider, Palette } from "std-widgets.slint";
+import { ComboBox, Slider, Switch, Palette } from "std-widgets.slint";
 
 export enum TestMode { idle, recording, playing, monitoring }
 
@@ -278,6 +278,8 @@ export component AppWindow inherits Window {
     in property <float> clip-pos;    // seconds
     in property <float> clip-max: 10;
     in-out property <bool> play-cleaned: true;
+    in-out property <bool> autostart;
+    in property <bool> has-tray;
 
     callback mic-selected(int);
     callback enabled-changed(bool);
@@ -287,6 +289,7 @@ export component AppWindow inherits Window {
     callback monitor();
     callback stop-test();
     callback play-cleaned-changed(bool);
+    callback autostart-changed(bool);
 
     private property <bool> has-mic: root.mics.length > 0;
     private property <bool> in-use: root.users != "";
@@ -627,5 +630,32 @@ export component AppWindow inherits Window {
             }
         }
 
+        // Startup
+        Card {
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Text { text: "Start on login"; font-size: 14px; font-weight: 600; color: Theme.text; }
+                    Text {
+                        text: root.has-tray
+                            ? "Closing the window keeps Esquie running in the tray. Right-click the tray icon to quit."
+                            : "Starts Esquie when you log in.";
+                        font-size: 12px;
+                        color: Theme.text-dim;
+                        wrap: word-wrap;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Switch {
+                        checked <=> root.autostart;
+                        toggled => { root.autostart-changed(self.checked); }
+                    }
+                }
+            }
+        }
     }
 }

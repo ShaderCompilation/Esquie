@@ -1,5 +1,7 @@
 mod audio;
+mod autostart;
 mod settings;
+mod tray;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -20,6 +22,34 @@ fn main() -> anyhow::Result<()> {
     ui.set_enabled(initial.enabled);
     ui.set_strength(initial.strength);
     ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
+    ui.set_autostart(autostart::is_enabled());
+
+    // Tray icon. Its callbacks run on the tray thread, so hop to the UI thread.
+    let tray = {
+        let ui_weak = ui.as_weak();
+        tray::spawn(initial.enabled, ui.get_autostart(), move |action| {
+            let _ = ui_weak.upgrade_in_event_loop(move |ui| match action {
+                tray::Action::ToggleWindow if ui.window().is_visible() => {
+                    let _ = ui.hide();
+                }
+                tray::Action::ToggleWindow | tray::Action::ShowWindow => {
+                    let _ = ui.show();
+                }
+                tray::Action::SetEnabled(on) => {
+                    ui.set_enabled(on);
+                    ui.invoke_enabled_changed(on);
+                }
+                tray::Action::SetAutostart(on) => {
+                    ui.set_autostart(on);
+                    ui.invoke_autostart_changed(on);
+                }
+                tray::Action::Quit => {
+                    let _ = slint::quit_event_loop();
+                }
+            });
+        })
+    };
+    ui.set_has_tray(tray.is_some());
 
     // Audio thread (PipeWire + DeepFilterNet).
     let (cmd_tx, cmd_rx) = pipewire::channel::channel::<Command>();
@@ -57,11 +87,32 @@ fn main() -> anyhow::Result<()> {
     {
         let shared = shared.clone();
         let settings = settings.clone();
+        let tray = tray.clone();
         ui.on_enabled_changed(move |on| {
             shared.enabled.store(on, Ordering::Relaxed);
             let mut s = settings.lock().unwrap();
             s.enabled = on;
             s.save();
+            if let Some(t) = &tray {
+                t.update(|t| t.enabled = on);
+            }
+        });
+    }
+    {
+        let tray = tray.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_autostart_changed(move |on| {
+            if let Err(e) = autostart::set_enabled(on) {
+                eprintln!("Could not update autostart: {e}");
+            }
+            // Re-read so the toggle shows what actually happened.
+            let actual = autostart::is_enabled();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_autostart(actual);
+            }
+            if let Some(t) = &tray {
+                t.update(|t| t.autostart = actual);
+            }
         });
     }
     {
@@ -111,7 +162,23 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
-    ui.run()?;
+    // With a tray, closing the window just hides it; quit from the tray menu.
+    // Without one, closing the window quits as usual.
+    if tray.is_none() {
+        ui.window().on_close_requested(|| {
+            let _ = slint::quit_event_loop();
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
+    let start_hidden = tray.is_some() && std::env::args().any(|a| a == autostart::HIDDEN_FLAG);
+    if !start_hidden {
+        ui.show()?;
+    }
+    slint::run_event_loop_until_quit()?;
+
+    if let Some(t) = tray {
+        t.shutdown().wait();
+    }
 
     let _ = cmd_tx.send(Command::Quit);
     let _ = audio_thread.join();
