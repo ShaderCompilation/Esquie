@@ -255,6 +255,35 @@ component Label inherits Text {
 }
 
 // ── Window ──────────────────────────────────────────────────────────────────
+component OptionRow inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled(bool);
+    spacing: 12px;
+    VerticalLayout {
+        alignment: center;
+        spacing: 2px;
+        horizontal-stretch: 1;
+        Text {
+            text: root.title;
+            font-size: 14px;
+            font-weight: 600;
+            color: root.enabled ? Theme.text : Theme.text-dim;
+        }
+        Text { text: root.description; font-size: 11px; color: Theme.text-dim; wrap: word-wrap; }
+    }
+    VerticalLayout {
+        alignment: center;
+        Switch {
+            enabled: root.enabled;
+            checked <=> root.checked;
+            toggled => { root.toggled(self.checked); }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Esquie";
     icon: @image-url("icon.svg");
@@ -277,6 +306,8 @@ export component AppWindow inherits Window {
     in property <float> clip-length; // seconds
     in property <float> clip-pos;    // seconds
     in property <float> clip-max: 10;
+    in-out property <bool> extra-cleanup: true;
+    in-out property <bool> gate: true;
     in-out property <bool> play-cleaned: true;
     in-out property <bool> autostart;
     in property <bool> has-tray;
@@ -288,6 +319,8 @@ export component AppWindow inherits Window {
     callback play();
     callback monitor();
     callback stop-test();
+    callback extra-cleanup-changed(bool);
+    callback gate-changed(bool);
     callback play-cleaned-changed(bool);
     callback autostart-changed(bool);
 
@@ -452,6 +485,20 @@ export component AppWindow inherits Window {
                     color: Theme.text-dim;
                     wrap: word-wrap;
                 }
+            }
+            OptionRow {
+                title: "Extra cleanup";
+                description: "Removes leftover noise more aggressively. Turn off if your voice sounds muffled.";
+                enabled: root.enabled;
+                checked <=> root.extra-cleanup;
+                toggled(on) => { root.extra-cleanup-changed(on); }
+            }
+            OptionRow {
+                title: "Silence between words";
+                description: "Fades to silence when you're not speaking. Turn off to keep a little room sound in pauses.";
+                enabled: root.enabled;
+                checked <=> root.gate;
+                toggled(on) => { root.gate-changed(on); }
             }
         }
 

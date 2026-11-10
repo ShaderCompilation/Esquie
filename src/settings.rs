@@ -7,11 +7,13 @@ pub struct Settings {
     pub mic: Option<String>,
     pub enabled: bool,
     pub strength: f32, // 0..=100, 100 = no limit
+    pub extra_cleanup: bool,
+    pub gate: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { mic: None, enabled: true, strength: 100.0 }
+        Self { mic: None, enabled: true, strength: 100.0, extra_cleanup: true, gate: true }
     }
 }
 
@@ -30,6 +32,8 @@ impl Settings {
             match line.split_once('=') {
                 Some(("mic", v)) if !v.is_empty() => s.mic = Some(v.to_string()),
                 Some(("enabled", v)) => s.enabled = v != "false",
+                Some(("extra_cleanup", v)) => s.extra_cleanup = v != "false",
+                Some(("gate", v)) => s.gate = v != "false",
                 Some(("strength", v)) => s.strength = v.parse::<f32>().unwrap_or(100.0).clamp(0.0, 100.0),
                 _ => {}
             }
@@ -43,10 +47,12 @@ impl Settings {
             let _ = std::fs::create_dir_all(dir);
         }
         let text = format!(
-            "mic={}\nenabled={}\nstrength={}\n",
+            "mic={}\nenabled={}\nstrength={}\nextra_cleanup={}\ngate={}\n",
             self.mic.as_deref().unwrap_or(""),
             self.enabled,
-            self.strength
+            self.strength,
+            self.extra_cleanup,
+            self.gate
         );
         let _ = std::fs::write(p, text);
     }

@@ -19,6 +19,8 @@ use pw::properties::properties;
 use pw::spa;
 use pw::stream::{StreamFlags, StreamListener, StreamRc};
 
+use crate::dsp::{Gate, HighPass, Tuning};
+
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const VIRTUAL_NODE_NAME: &str = "esquie";
 const MAX_QUEUE: usize = SAMPLE_RATE as usize / 5; // 200 ms: beyond this we drop old audio
@@ -41,6 +43,10 @@ pub struct Shared {
     pub enabled: AtomicBool,
     /// During sample playback: play the cleaned version (true) or the original.
     pub play_cleaned: AtomicBool,
+    /// DeepFilterNet's post-filter ("Extra cleanup" in the UI).
+    pub extra_cleanup: AtomicBool,
+    /// Speech gate ("Silence between words" in the UI).
+    pub gate: AtomicBool,
     atten_db: AtomicU32,
     in_level: AtomicU32,
     out_level: AtomicU32,
@@ -50,10 +56,12 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new(enabled: bool, atten_db: f32) -> Self {
+    pub fn new(enabled: bool, atten_db: f32, extra_cleanup: bool, gate: bool) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
             play_cleaned: AtomicBool::new(true),
+            extra_cleanup: AtomicBool::new(extra_cleanup),
+            gate: AtomicBool::new(gate),
             atten_db: AtomicU32::new(atten_db.to_bits()),
             in_level: AtomicU32::new(0),
             out_level: AtomicU32::new(0),
@@ -121,10 +129,86 @@ pub enum Event {
     Error(String),
 }
 
-struct Engine {
+/// The full cleaning chain for one stream: high-pass -> DeepFilterNet -> gate.
+struct Cleaner {
     df: DfTract,
-    hop: usize,
+    hpf: HighPass,
+    gate: Gate,
     atten_db: f32,
+    gate_on: bool,
+    buf: Vec<f32>,
+}
+
+impl Cleaner {
+    fn new(shared: &Shared) -> Result<Self> {
+        let t = Tuning::get();
+        let atten_db = shared.atten_db();
+        let params = RuntimeParams::default_with_ch(1)
+            .with_atten_lim(atten_db)
+            .with_thresholds(t.min_db, t.max_erb_db, t.max_df_db)
+            .with_post_filter(t.pf_beta);
+        let df = DfTract::new(DfParams::default(), &params).context("loading DeepFilterNet model")?;
+        anyhow::ensure!(df.sr == SAMPLE_RATE as usize, "model sample rate is {}", df.sr);
+        let hop = df.hop_size;
+        let mut c = Self {
+            hpf: HighPass::new(t.hpf_hz, SAMPLE_RATE as f32),
+            gate: Gate::new(t, SAMPLE_RATE as f32, hop),
+            df,
+            atten_db,
+            gate_on: false,
+            buf: vec![0.0; hop],
+        };
+        c.sync(shared);
+        Ok(c)
+    }
+
+    /// Pick up setting changes from the UI.
+    fn sync(&mut self, shared: &Shared) {
+        let db = shared.atten_db();
+        if db != self.atten_db {
+            self.atten_db = db;
+            self.df.set_atten_lim(db);
+        }
+        self.df.post_filter = shared.extra_cleanup.load(Ordering::Relaxed) && Tuning::get().pf_beta > 0.0;
+        let gate_on = shared.gate.load(Ordering::Relaxed);
+        if gate_on != self.gate_on {
+            self.gate_on = gate_on;
+            self.gate.reset();
+        }
+    }
+
+    /// Clean one hop-sized frame. Returns the model's local SNR estimate.
+    fn process(&mut self, input: &[f32], out: &mut [f32]) -> f32 {
+        let hop = self.buf.len();
+        self.buf.copy_from_slice(input);
+        self.hpf.process(&mut self.buf);
+        let noisy = ArrayView2::from_shape((1, hop), &self.buf[..]).unwrap();
+        let enh = ArrayViewMut2::from_shape((1, hop), out).unwrap();
+        match self.df.process(noisy, enh) {
+            Ok(lsnr) => {
+                if self.gate_on {
+                    self.gate.process(out, lsnr);
+                }
+                lsnr
+            }
+            Err(_) => {
+                out.copy_from_slice(input);
+                0.0
+            }
+        }
+    }
+
+    /// Clear filter/gate state, e.g. when resuming after passthrough.
+    fn reset(&mut self) {
+        self.hpf.reset();
+        self.gate.reset();
+    }
+}
+
+struct Engine {
+    cleaner: Cleaner,
+    hop: usize,
+    was_enabled: bool,
     input: Vec<f32>,
     frame_out: Vec<f32>,
     queue: VecDeque<f32>,
@@ -136,8 +220,7 @@ struct Engine {
 /// Test playback: a second model instance so a recorded sample can be heard
 /// both raw and cleaned (with the current strength) without touching the live mic.
 struct Preview {
-    df: DfTract,
-    atten_db: f32,
+    cleaner: Cleaner,
     mode: PreviewMode,
     clip: Vec<f32>,
     pos: usize,
@@ -146,13 +229,6 @@ struct Preview {
     frame: Vec<f32>,
     /// Recording hit the length limit, or playback reached the end.
     finished: bool,
-}
-
-fn load_model(atten_db: f32) -> Result<DfTract> {
-    let params = RuntimeParams::default_with_ch(1).with_atten_lim(atten_db);
-    let df = DfTract::new(DfParams::default(), &params).context("loading DeepFilterNet model")?;
-    anyhow::ensure!(df.sr == SAMPLE_RATE as usize, "model sample rate is {}", df.sr);
-    Ok(df)
 }
 
 /// Pops `out.len()` samples once the queue holds a small cushion, else silence.
@@ -190,20 +266,12 @@ impl Preview {
                 pull(&mut self.queue, &mut self.primed, out, hop);
             }
             PreviewMode::Playing => {
-                let db = shared.atten_db();
-                if db != self.atten_db {
-                    self.atten_db = db;
-                    self.df.set_atten_lim(db);
-                }
+                self.cleaner.sync(shared);
                 let cleaned = shared.play_cleaned.load(Ordering::Relaxed);
                 while self.queue.len() < out.len() && self.pos + hop <= self.clip.len() {
                     let frame = &self.clip[self.pos..self.pos + hop];
                     // Always run the model so switching to "cleaned" mid-play is seamless.
-                    let noisy = ArrayView2::from_shape((1, hop), frame).unwrap();
-                    let enh = ArrayViewMut2::from_shape((1, hop), &mut self.frame[..]).unwrap();
-                    if self.df.process(noisy, enh).is_err() {
-                        self.frame.copy_from_slice(frame);
-                    }
+                    self.cleaner.process(frame, &mut self.frame);
                     self.queue.extend(if cleaned { &self.frame[..] } else { frame }.iter().copied());
                     self.pos += hop;
                 }
@@ -224,12 +292,10 @@ impl Preview {
 
 impl Engine {
     fn new(shared: Arc<Shared>) -> Result<Self> {
-        let atten_db = shared.atten_db();
-        let df = load_model(atten_db)?;
-        let hop = df.hop_size;
+        let cleaner = Cleaner::new(&shared)?;
+        let hop = cleaner.buf.len();
         let preview = Preview {
-            df: load_model(atten_db)?,
-            atten_db,
+            cleaner: Cleaner::new(&shared)?,
             mode: PreviewMode::Idle,
             clip: Vec::with_capacity(MAX_CLIP),
             pos: 0,
@@ -239,9 +305,9 @@ impl Engine {
             finished: false,
         };
         Ok(Self {
-            df,
+            cleaner,
             hop,
-            atten_db,
+            was_enabled: true,
             input: Vec::with_capacity(hop * 8),
             frame_out: vec![0.0; hop],
             queue: VecDeque::with_capacity(MAX_QUEUE * 2),
@@ -264,22 +330,18 @@ impl Engine {
             p.finished = p.clip.len() >= MAX_CLIP;
         }
 
-        let db = self.shared.atten_db();
-        if db != self.atten_db {
-            self.atten_db = db;
-            self.df.set_atten_lim(db);
-        }
+        self.cleaner.sync(&self.shared);
         let enabled = self.shared.enabled.load(Ordering::Relaxed);
+        if enabled && !self.was_enabled {
+            self.cleaner.reset();
+        }
+        self.was_enabled = enabled;
 
         let mut start = 0;
         while self.input.len() - start >= self.hop {
             let frame = &self.input[start..start + self.hop];
             if enabled {
-                let noisy = ArrayView2::from_shape((1, self.hop), frame).unwrap();
-                let enh = ArrayViewMut2::from_shape((1, self.hop), &mut self.frame_out[..]).unwrap();
-                if self.df.process(noisy, enh).is_err() {
-                    self.frame_out.copy_from_slice(frame);
-                }
+                self.cleaner.process(frame, &mut self.frame_out);
             } else {
                 self.frame_out.copy_from_slice(frame);
             }
@@ -825,7 +887,7 @@ mod tests {
 
     /// Runs 3 s of input through the engine, returns RMS of the last 2 s in dB.
     fn run_through(input: &[f32], enabled: bool) -> f32 {
-        let shared = Arc::new(Shared::new(enabled, 100.0));
+        let shared = Arc::new(Shared::new(enabled, 100.0, true, true));
         let mut engine = Engine::new(shared).unwrap();
         let mut out = Vec::new();
         for chunk in input.chunks(1024) {
@@ -854,5 +916,125 @@ mod tests {
     fn json_name_parses() {
         assert_eq!(json_name(r#"{"name":"alsa_input.x"}"#).as_deref(), Some("alsa_input.x"));
         assert_eq!(json_name("{}"), None);
+    }
+}
+
+/// Tuning aids for the values in `dsp::Tuning` (run with `ESQUIE_*` overrides):
+/// `cargo test --release tune -- --ignored --nocapture`
+/// Uses the speech/noise samples shipped in the DeepFilterNet git checkout.
+#[cfg(test)]
+mod tune {
+    use super::*;
+
+    const ASSETS: &str = concat!(env!("HOME"), "/.cargo/git/checkouts/deepfilternet-6ca5774fd310b300/978576a/assets");
+
+    fn wav_mono(path: &str) -> Vec<f32> {
+        let b = std::fs::read(path).unwrap();
+        let ch = u16::from_le_bytes([b[22], b[23]]) as usize;
+        let mut i = 12;
+        while &b[i..i + 4] != b"data" {
+            i += 8 + u32::from_le_bytes(b[i + 4..i + 8].try_into().unwrap()) as usize;
+        }
+        let pcm: Vec<f32> = b[i + 8..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0).collect();
+        pcm.chunks_exact(ch).map(|f| f[0]).collect()
+    }
+
+    fn energy_db(x: &[f32]) -> f32 {
+        10.0 * (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).max(1e-12).log10()
+    }
+
+    /// Noise only (nobody talking): how loud is what's left, per setting?
+    #[test]
+    #[ignore]
+    fn tune_noise_only() {
+        for noise_file in ["noise_freesound_573577.wav", "noise_freesound_2530.wav"] {
+            let noise = wav_mono(&format!("{ASSETS}/{noise_file}"));
+            let k = 10f32.powf((-30.0 - energy_db(&noise)) / 20.0); // noise at -30 dBFS
+            let noise: Vec<f32> = noise.iter().map(|v| v * k).collect();
+            println!("\n{noise_file}: input {:.1} dBFS", energy_db(&noise));
+            for (pf, gate, strength) in [(false, false, 100.0), (true, false, 100.0), (false, true, 100.0), (true, true, 100.0), (true, false, 38.5), (true, true, 38.5)] {
+                let shared = Shared::new(true, crate::settings::strength_to_db(strength), pf, gate);
+                let mut c = Cleaner::new(&shared).unwrap();
+                let hop = c.buf.len();
+                let mut out = vec![0.0; noise.len() / hop * hop];
+                for (i, o) in noise.chunks_exact(hop).zip(out.chunks_exact_mut(hop)) {
+                    c.process(i, o);
+                }
+                let tail = &out[SAMPLE_RATE as usize..];
+                let peak = tail.chunks(hop).map(energy_db).fold(f32::MIN, f32::max);
+                println!(
+                    "  strength {strength:>5} extra_cleanup {pf:<5} gate {gate:<5}: left {:>6.1} dBFS avg, loudest 10 ms {:>6.1} dBFS",
+                    energy_db(tail), peak
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn tune() {
+        let clean = wav_mono(&format!("{ASSETS}/clean_freesound_33711.wav"));
+        for noise_file in ["noise_freesound_573577.wav", "noise_freesound_2530.wav"] {
+            let noise = wav_mono(&format!("{ASSETS}/{noise_file}"));
+            for snr in [0.0f32, 10.0] {
+                let n = clean.len();
+                let k = 10f32.powf((energy_db(&clean) - energy_db(&noise[..n.min(noise.len())]) - snr) / 20.0);
+                let mix: Vec<f32> = (0..n).map(|i| (clean[i] + noise[i % noise.len()] * k) * 0.5).collect();
+
+                let shared = Shared::new(true, 100.0, true, false);
+                let mut c = Cleaner::new(&shared).unwrap();
+                let hop = c.buf.len();
+                let frames = n / hop;
+                let mut out = vec![0.0; frames * hop];
+                let mut lsnr = Vec::new();
+                for f in 0..frames {
+                    lsnr.push(c.process(&mix[f * hop..(f + 1) * hop], &mut out[f * hop..(f + 1) * hop]));
+                }
+                // Model delay, by cross-correlating output with clean speech.
+                let delay = (0..2400)
+                    .step_by(hop / 4)
+                    .max_by_key(|&d| (out[d..].iter().zip(&clean).map(|(a, b)| a * b).sum::<f32>() * 1e6) as i64)
+                    .unwrap();
+                // Speech frames: clean-speech energy within 35 dB of its loudest frame.
+                let fe: Vec<f32> = (0..frames).map(|f| energy_db(&clean[f * hop..(f + 1) * hop])).collect();
+                let peak = fe.iter().cloned().fold(f32::MIN, f32::max);
+                let speech: Vec<bool> = fe.iter().map(|&e| e > peak - 35.0).collect();
+                let (mut ls_s, mut ls_n): (Vec<f32>, Vec<f32>) = (vec![], vec![]);
+                for (f, &l) in lsnr.iter().enumerate() {
+                    if speech[f] { ls_s.push(l) } else { ls_n.push(l) }
+                }
+                let pct = |v: &mut Vec<f32>, p: f32| { v.sort_by(|a, b| a.total_cmp(b)); v[((v.len() - 1) as f32 * p) as usize] };
+                let mut runs = vec![];
+                let mut r = 0;
+                for &sp in &speech { if sp { if r > 0 { runs.push(r) } r = 0 } else { r += 1 } }
+                println!("pause frames {} of {frames}; pauses longer than 250 ms: {:?} frames", ls_n.len(), runs.iter().filter(|&&r| r > 25).collect::<Vec<_>>());
+                println!(
+                    "\n{noise_file} @ {snr} dB SNR (delay {delay}): lsnr speech p10/p50 {:.1}/{:.1}, pauses p50/p90 {:.1}/{:.1}",
+                    pct(&mut ls_s, 0.1), pct(&mut ls_s, 0.5), pct(&mut ls_n, 0.5), pct(&mut ls_n, 0.9)
+                );
+                for (open, confirm) in [(-5.0f32, 1.0f32), (-5.0, 2.0), (0.0, 2.0), (0.0, 3.0), (5.0, 2.0)] {
+                    let t = Tuning { gate_open_db: open, gate_confirm_frames: confirm, ..*Tuning::get() };
+                    let mut g = Gate::new(&t, SAMPLE_RATE as f32, hop);
+                    let mut gated = out.clone();
+                    for f in 0..frames {
+                        g.process(&mut gated[f * hop..(f + 1) * hop], lsnr[f]);
+                    }
+                    // Compare output aligned with the clean speech timeline (power, not dB averages).
+                    let (mut sp_o, mut sp_g, mut pz_o, mut pz_g) = (0f64, 0f64, 0f64, 0f64);
+                    for f in 0..frames {
+                        let a = f * hop + delay;
+                        if a + hop > out.len() { break; }
+                        let p = |x: &[f32]| x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
+                        if speech[f] { sp_o += p(&out[a..a + hop]); sp_g += p(&gated[a..a + hop]) }
+                        else { pz_o += p(&out[a..a + hop]); pz_g += p(&gated[a..a + hop]) }
+                    }
+                    let db = |x: f64| 10.0 * x.max(1e-20).log10();
+                    println!(
+                        "  open {open:>5} confirm {confirm}: speech lost {:.2} dB, noise in pauses {:.1} -> {:.1} dB below speech",
+                        db(sp_o) - db(sp_g), db(sp_o) - db(pz_o), db(sp_g) - db(pz_g)
+                    );
+                }
+            }
+        }
     }
 }

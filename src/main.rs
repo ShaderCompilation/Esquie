@@ -1,5 +1,6 @@
 mod audio;
 mod autostart;
+mod dsp;
 mod settings;
 mod tray;
 
@@ -16,7 +17,12 @@ slint::include_modules!();
 fn main() -> anyhow::Result<()> {
     let settings = Arc::new(Mutex::new(Settings::load()));
     let initial = settings.lock().unwrap().clone();
-    let shared = Arc::new(Shared::new(initial.enabled, strength_to_db(initial.strength)));
+    let shared = Arc::new(Shared::new(
+        initial.enabled,
+        strength_to_db(initial.strength),
+        initial.extra_cleanup,
+        initial.gate,
+    ));
 
     let ui = AppWindow::new()?;
     // Must match the .desktop file name so GNOME can link the window to the
@@ -25,6 +31,8 @@ fn main() -> anyhow::Result<()> {
     slint::set_xdg_app_id("esquie")?;
     ui.set_enabled(initial.enabled);
     ui.set_strength(initial.strength);
+    ui.set_extra_cleanup(initial.extra_cleanup);
+    ui.set_gate(initial.gate);
     ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
     ui.set_autostart(autostart::is_enabled());
 
@@ -126,6 +134,26 @@ fn main() -> anyhow::Result<()> {
             shared.set_atten_db(strength_to_db(v));
             let mut s = settings.lock().unwrap();
             s.strength = v;
+            s.save();
+        });
+    }
+    {
+        let shared = shared.clone();
+        let settings = settings.clone();
+        ui.on_extra_cleanup_changed(move |on| {
+            shared.extra_cleanup.store(on, Ordering::Relaxed);
+            let mut s = settings.lock().unwrap();
+            s.extra_cleanup = on;
+            s.save();
+        });
+    }
+    {
+        let shared = shared.clone();
+        let settings = settings.clone();
+        ui.on_gate_changed(move |on| {
+            shared.gate.store(on, Ordering::Relaxed);
+            let mut s = settings.lock().unwrap();
+            s.gate = on;
             s.save();
         });
     }
