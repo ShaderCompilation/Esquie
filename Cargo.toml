@@ -1,0 +1,14 @@
+[package]
+name = "esquie"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", tag = "v0.5.6", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+pipewire = { version = "0.10", features = ["v1_0_0"] }
+slint = "1.18"
+anyhow = "1"
+
+[build-dependencies]
+slint-build = "1.18"

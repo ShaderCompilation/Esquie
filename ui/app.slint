@@ -1,0 +1,88 @@
+import { ComboBox, Switch, Slider, ProgressIndicator, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Esquie";
+    preferred-width: 380px;
+    min-width: 320px;
+
+    in property <[string]> mics;
+    in property <[string]> mic-names; // PipeWire node names, same order as `mics`
+    in-out property <int> mic-index: -1;
+    in-out property <bool> enabled: true;
+    in-out property <float> strength: 100;
+    in property <float> in-level;
+    in property <float> out-level;
+    in property <string> status: "Starting…";
+
+    callback mic-selected(int);
+    callback enabled-changed(bool);
+    callback strength-changed(float);
+
+    VerticalBox {
+        spacing: 12px;
+
+        Text {
+            text: "Esquie";
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        GroupBox {
+            title: "Microphone";
+            ComboBox {
+                model: root.mics;
+                current-index <=> root.mic-index;
+                selected => { root.mic-selected(self.current-index); }
+            }
+        }
+
+        HorizontalBox {
+            padding: 0;
+            Text {
+                text: "Noise removal";
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Switch {
+                checked <=> root.enabled;
+                toggled => { root.enabled-changed(self.checked); }
+            }
+        }
+
+        VerticalBox {
+            padding: 0;
+            spacing: 4px;
+            HorizontalBox {
+                padding: 0;
+                Text { text: "Strength"; horizontal-stretch: 1; }
+                Text { text: root.strength >= 100 ? "Max" : round(root.strength) + "%"; }
+            }
+            Slider {
+                minimum: 0;
+                maximum: 100;
+                value <=> root.strength;
+                enabled: root.enabled;
+                changed(v) => { root.strength-changed(v); }
+            }
+        }
+
+        GridLayout {
+            spacing: 8px;
+            Row {
+                Text { text: "Input"; vertical-alignment: center; }
+                ProgressIndicator { progress: root.in-level; }
+            }
+            Row {
+                Text { text: "Output"; vertical-alignment: center; }
+                ProgressIndicator { progress: root.out-level; }
+            }
+        }
+
+        Text {
+            text: root.status;
+            wrap: word-wrap;
+            font-size: 12px;
+            opacity: 0.75;
+        }
+    }
+}
