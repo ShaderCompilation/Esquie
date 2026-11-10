@@ -431,6 +431,14 @@ struct State {
     active: RefCell<Option<String>>,
     preferred: RefCell<Option<String>>,      // mic the user picked (saved)
     system_default: RefCell<Option<String>>, // system default mic, used until the user picks one
+    /// We've heard what the system default is (so we don't overwrite it blind).
+    default_known: Cell<bool>,
+    /// The system default is our own virtual mic.
+    default_is_virtual: Cell<bool>,
+    /// The picked mic has been made the system default, so the desktop's mic
+    /// volume slider controls it. Done once per pick, so we never fight the
+    /// user changing the default elsewhere afterwards.
+    default_synced: Cell<bool>,
     metadata: RefCell<Option<(pw::metadata::Metadata, pw::metadata::MetadataListener)>>,
     /// Speaker stream for the test section; exists only while testing.
     preview: RefCell<Option<(StreamRc, StreamListener<()>)>>,
@@ -636,6 +644,7 @@ impl State {
     fn on_mic_added(&self, id: u32, mic: Mic) {
         let name = mic.name.clone();
         self.mics.borrow_mut().push((id, mic));
+        self.sync_default();
         let active = self.active.borrow().clone();
         let use_it = match (&active, self.wanted()) {
             (None, _) => true,                                // anything beats nothing
@@ -653,9 +662,31 @@ impl State {
         self.preferred.borrow().clone().or_else(|| self.system_default.borrow().clone())
     }
 
+    /// Make the picked mic the system default (see `default_synced`).
+    fn sync_default(&self) {
+        if self.default_synced.get() || !self.default_known.get() {
+            return;
+        }
+        let Some(wanted) = self.preferred.borrow().clone() else { return };
+        if !self.mics.borrow().iter().any(|(_, m)| m.name == wanted) {
+            return; // not plugged in; try again when it shows up
+        }
+        let metadata = self.metadata.borrow();
+        let Some((metadata, _)) = metadata.as_ref() else { return };
+        self.default_synced.set(true);
+        if self.default_is_virtual.get() || self.system_default.borrow().as_deref() == Some(&wanted) {
+            return;
+        }
+        let value = format!("{{\"name\":\"{wanted}\"}}");
+        metadata.set_property(0, "default.configured.audio.source", Some("Spa:String:JSON"), Some(&value));
+    }
+
     fn on_default_changed(&self, name: Option<String>) {
+        self.default_known.set(true);
+        self.default_is_virtual.set(name.as_deref() == Some(VIRTUAL_NODE_NAME));
         let name = name.filter(|n| n != VIRTUAL_NODE_NAME);
         self.system_default.replace(name.clone());
+        self.sync_default();
         let Some(name) = name else { return };
         if self.preferred.borrow().is_some() || self.active.borrow().as_deref() == Some(&name) {
             return;
@@ -767,6 +798,9 @@ pub fn run(
         active: RefCell::new(None),
         preferred: RefCell::new(preferred_mic),
         system_default: RefCell::new(None),
+        default_known: Cell::new(false),
+        default_is_virtual: Cell::new(false),
+        default_synced: Cell::new(false),
         metadata: RefCell::new(None),
         preview: RefCell::new(None),
         virtual_id: Cell::new(None),
@@ -857,6 +891,8 @@ pub fn run(
     let _commands = commands.attach(mainloop.loop_(), move |cmd| match cmd {
         Command::SelectMic(name) => {
             st.preferred.replace(Some(name.clone()));
+            st.default_synced.set(false);
+            st.sync_default();
             st.start_capture(&name);
         }
         Command::Record => st.record(),
