@@ -180,7 +180,7 @@ fn render_icon() -> Vec<Icon> {
 
 /// Tray availability against a fake StatusNotifierWatcher that starts late,
 /// disappears, and returns. Needs a private session bus, never the desktop's:
-/// see docs/phase3-validation.md.
+/// run with ESQUIE_PRIVATE_BUS=1 under dbus-run-session.
 #[cfg(test)]
 mod live {
     use super::*;

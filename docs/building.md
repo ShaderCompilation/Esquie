@@ -3,7 +3,6 @@
 The initial x86_64 matrix is Ubuntu 24.04 and 26.04 LTS, Debian 13, Fedora 44
 and 45, and current Arch Linux. These are CI targets; a configured job is not
 evidence that the distro or a real desktop session has passed validation.
-Local clean-container results are recorded in [Phase 1 validation](phase1-validation.md).
 
 ## Toolchain and dependency resolution
 
@@ -135,7 +134,8 @@ The distro repositories intentionally track supported updates (and Arch's
 current packages). These records identify a validation environment; they do
 not promise byte-identical builds or pin OS package repositories to snapshots.
 Wayland rendering, accessibility, real hardware audio, and desktop/hardware checks are
-separate validation work described in the compatibility plan.
+separate checks; synthetic audio and virtual displays do not establish hardware
+compatibility, speech quality, latency, or GPU behavior.
 
 ### Isolated audio integration
 
@@ -163,7 +163,7 @@ sandbox that forbids socket creation. `--harness PATH` selects a different build
 directory and `--out PATH` selects the evidence directory (default:
 `target/validation/audio`). A failed or interrupted check must not be treated
 as a pass; review the overall status, all scenario results, and command exit
-status. See [Phase 5 validation](phase5-validation.md) for scope and results.
+status. Results apply only to the tested environment and scenario.
 
 ## Building the AppImage
 
@@ -205,7 +205,9 @@ excludelist (glibc and the loader, libgcc_s, fontconfig/FreeType, X11/Wayland,
 and GL/EGL drivers stay on the host). `libpipewire-0.3.so.0` is excluded
 explicitly: the host's copy must load the host's SPA plugins and read the host's
 configuration. The current binary's only other dependencies are on the
-excludelist, so the payload is the executable, desktop entry, and icon.
+excludelist, so the payload includes the executable, desktop entry, icon, and
+license documentation under `usr/share/doc/esquie/`. Inspect the built payload
+when dependencies change; additional bundled libraries need their own notices.
 `packaging/appimage/inspect.sh` fails the build if the AppImage is not type 2,
 bundles PipeWire, its plugins or configuration, an audio service, glibc, the
 loader, or graphics drivers, changes the environment through `AppRun`, or no
@@ -230,8 +232,52 @@ GitHub Actions builds one AppImage candidate on Ubuntu 24.04, uploads it with
 its checksum and build evidence, and tests that same artifact in all six
 runtime-only containers. The aggregate **All automated release gates** job also
 requires the six source build/test jobs. Candidate uploads do not publish a
-release; see [review and manual release gates](releases.md).
+release. Automated results do not replace real desktop, microphone, Bluetooth,
+login, and suspend/resume testing.
 
 To update a pinned tool, change its URL in `container-build.sh` and its line in
 `tools.sha256`, using the digest published with the release, then rebuild and
 rerun the tests.
+
+## Audio tuning
+
+Values that aren't in the UI live in `Tuning` in `src/dsp.rs`. Each can be
+overridden with an environment variable for listening tests, e.g.
+`ESQUIE_GATE_OPEN_DB=3 cargo run --release --locked`:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `ESQUIE_HPF_HZ` | 80 | High-pass cutoff (0 = off) |
+| `ESQUIE_MIN_DB` / `ESQUIE_MAX_ERB_DB` / `ESQUIE_MAX_DF_DB` | -10 / 30 / 20 | DeepFilterNet's speech thresholds |
+| `ESQUIE_PF_BETA` | 0.02 | Post-filter strength ("Extra cleanup") |
+| `ESQUIE_GATE_OPEN_DB` | 0 | Speech estimate that opens the gate |
+| `ESQUIE_GATE_CONFIRM_FRAMES` | 2 | 10 ms frames in a row needed to open (ignores clicks) |
+| `ESQUIE_GATE_HOLD_MS` | 250 | How long it stays open after speech |
+| `ESQUIE_GATE_ATTACK_MS` / `ESQUIE_GATE_RELEASE_MS` | 5 / 120 | Fade in / fade out |
+| `ESQUIE_GATE_FLOOR_DB` | -50 | How quiet "closed" is |
+
+`cargo test --release --locked tune -- --ignored --nocapture` measures leftover noise and
+speech loss on the sample recordings in the DeepFilterNet checkout.
+
+## License documentation
+
+The AppImage build installs pinned `cargo-about` **0.9.3** and generates its
+license bundle automatically. To generate the same documentation locally:
+
+```sh
+cargo install --locked --version 0.9.3 --features cli cargo-about
+python3 packaging/licenses/generate.py
+```
+
+This requires Python 3 and uses `about.toml`, the committed template and reviewed
+license inputs in `packaging/licenses/`, and the existing `Cargo.lock`.
+Output is ignored under `target/licenses/`; do not commit generated reports.
+`--offline` works when the locked crate sources are already cached.
+Generation fails on unresolved licenses, missing upstream copyright supplements,
+or changed input checksums. Build dependencies are included; dependencies used
+only by tests are excluded. Review notices when changing dependencies or runtime
+pins, including any new files that linuxdeploy adds to the payload.
+
+The AppImage includes these texts and its lockfile in `usr/share/doc/esquie/`.
+Payload inspection requires them. See [third-party notices](../THIRD_PARTY_NOTICES.md)
+for the embedded model, AppImage runtime, and corresponding-source requirements.

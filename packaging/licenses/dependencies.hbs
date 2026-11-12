@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Esquie dependency licenses</title></head>
+<body>
+<h1>Esquie dependency licenses</h1>
+<p>Generated from Cargo.lock for x86_64 Linux. Includes build dependencies;
+excludes dependencies used only by tests. The accompanying cargo-notices.html
+retains additional upstream license and copyright files. See THIRD_PARTY_NOTICES.md for
+non-Cargo components and the embedded model.</p>
+{{#each licenses}}
+<section>
+<h2>{{name}} ({{id}})</h2>
+<ul>
+{{#each used_by}}
+<li>{{crate.name}} {{crate.version}} — {{#each crate.authors}}{{this}}; {{/each}}{{#if crate.repository}} — <a href="{{crate.repository}}">upstream</a>{{/if}}</li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+</section>
+{{/each}}
+</body>
+</html>

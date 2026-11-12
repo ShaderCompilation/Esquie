@@ -6,9 +6,9 @@ packages. It is built on Ubuntu 24.04, the oldest supported baseline. The source
 installer remains available: `./install.sh` builds from a checkout and installs
 for the current user (see [building Esquie](building.md)).
 
-GitHub Actions artifacts are review candidates. Check [release validation and
-known limitations](releases.md) before treating a candidate as release-ready;
-real desktop and hardware checks are recorded separately from container tests.
+GitHub Actions artifacts are review candidates, not published releases. Automated
+container checks do not establish real desktop, GPU, microphone, Bluetooth, or
+suspend/resume compatibility. See [troubleshooting](troubleshooting.md) for help.
 
 ## Download, verify, and run
 
@@ -35,7 +35,7 @@ opening a window or connecting to audio.
 
 ## Host prerequisites
 
-The AppImage contains Esquie, its desktop entry, and its icon. It deliberately
+The AppImage contains Esquie, its desktop entry, its icon, and license notices. It deliberately
 uses these from your system:
 
 - **PipeWire 1.0 or newer** with a running session manager (WirePlumber), as on
@@ -153,3 +153,10 @@ launcher and **Start on login** point at
 copying only its executable through **Install a copy** is disabled. To update,
 extract the new version and replace the directory. Select its path again from
 Settings if you moved it.
+
+## License information
+
+Esquie is licensed under [GPL-3.0-only](../LICENSE). After extraction, license
+texts and third-party notices are in `squashfs-root/usr/share/doc/esquie/`.
+The [third-party notice overview](../THIRD_PARTY_NOTICES.md) explains the
+embedded model and other components.

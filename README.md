@@ -19,16 +19,13 @@ current scope.
 Compatibility work focuses on installation and dependencies across distributions,
 Wayland and X11 desktop sessions, operation with or without a system tray, and
 audio recovery after device changes, suspend/resume, or PipeWire restarts.
-[Clean builds and automated checks pass across the initial distro matrix](docs/phase1-validation.md).
-Esquie waits for PipeWire if it starts first, reconnects after PipeWire or
-WirePlumber restarts, and falls back to another microphone while the selected
-one is unplugged ([recovery checks](docs/phase2-validation.md)). The same
-AppImage runs against each matrix distro's own PipeWire in runtime-only
-containers ([AppImage checks](docs/phase4-validation.md)). Desktop and hardware
-coverage still needs validation.
-Automated candidate gates, separate manual records, and publication criteria
-are described in [release preparation](docs/releases.md) and the
-[Phase 5 validation record](docs/phase5-validation.md).
+The configured CI matrix covers source builds and AppImage checks on Ubuntu,
+Debian, Fedora, and Arch Linux. Container tests cover synthetic audio and
+software rendering; they do not establish real desktop or hardware compatibility.
+Esquie reconnects after PipeWire restarts and falls back to another microphone
+while the selected one is unplugged. After a restart, consumer apps may need to
+select the virtual microphone again. See [building and checks](docs/building.md)
+for the matrix and [troubleshooting](docs/troubleshooting.md) for help.
 
 ## AppImage
 
@@ -143,22 +140,15 @@ real mic ──► esquie-input (capture stream)
   details from the Diagnostics card in Settings.
 - `cargo test --release --locked` checks that the model removes synthetic noise.
 
-## Tuning (developers)
+## Help and contributions
 
-Values that aren't in the UI live in `Tuning` in `src/dsp.rs`. Each can be
-overridden with an environment variable for listening tests, e.g.
-`ESQUIE_GATE_OPEN_DB=3 cargo run --release --locked`:
+Bug reports, feature requests, and testing on different Linux desktops and
+microphones are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md).
+Before starting a code contribution, open an issue and obtain maintainer
+approval for its scope.
 
-| Variable | Default | What it does |
-|---|---|---|
-| `ESQUIE_HPF_HZ` | 80 | High-pass cutoff (0 = off) |
-| `ESQUIE_MIN_DB` / `ESQUIE_MAX_ERB_DB` / `ESQUIE_MAX_DF_DB` | -10 / 30 / 20 | DeepFilterNet's speech thresholds |
-| `ESQUIE_PF_BETA` | 0.02 | Post-filter strength ("Extra cleanup") |
-| `ESQUIE_GATE_OPEN_DB` | 0 | Speech estimate that opens the gate |
-| `ESQUIE_GATE_CONFIRM_FRAMES` | 2 | 10 ms frames in a row needed to open (ignores clicks) |
-| `ESQUIE_GATE_HOLD_MS` | 250 | How long it stays open after speech |
-| `ESQUIE_GATE_ATTACK_MS` / `ESQUIE_GATE_RELEASE_MS` | 5 / 120 | Fade in / fade out |
-| `ESQUIE_GATE_FLOOR_DB` | -50 | How quiet "closed" is |
+## License
 
-`cargo test --release --locked tune -- --ignored --nocapture` measures leftover noise and
-speech loss on the sample recordings in the DeepFilterNet checkout.
+Copyright © 2026 Hayk Sahakyan. Esquie's code, documentation, and artwork are
+licensed under [GPL-3.0-only](LICENSE). Dependencies and the embedded model retain their own
+licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).

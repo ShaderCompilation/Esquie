@@ -1,0 +1,25 @@
+name: Compatibility report
+description: Share testing results for a Linux desktop or microphone.
+body:
+  - type: markdown
+    attributes:
+      value: Report what was actually tested; distinguish not tested from passed. Review diagnostics before attaching them. Recordings are optional.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Test environment
+      description: Esquie version or commit and installation type; distro; desktop and Wayland/X11; GPU/renderer; tray; PipeWire/WirePlumber versions; microphone and consumer app.
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks and results
+      description: Describe steps and observed results for the scenarios you tried, such as capture, noise removal, tray, login, unplug/replug, or suspend/resume. Mark other scenarios as not tested.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional information or reviewed diagnostics
+      description: Include relevant logs or measurements if available. Only share recordings you are comfortable publishing.

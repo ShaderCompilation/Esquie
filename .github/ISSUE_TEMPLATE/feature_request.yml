@@ -1,0 +1,20 @@
+name: Feature request
+description: Discuss a problem and a proposed improvement.
+body:
+  - type: markdown
+    attributes:
+      value: Requests are discussed against the app's direction and maintenance cost. Obtain explicit maintainer approval before starting implementation.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and affected users
+      description: Describe the task you are trying to complete and your current workaround.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the outcome you want and any alternatives considered.
+    validations:
+      required: true

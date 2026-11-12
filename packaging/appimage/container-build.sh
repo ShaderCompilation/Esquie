@@ -21,7 +21,7 @@ mkdir -p "$work/tools" "$out/evidence"
 
 bash ci/install-deps.sh
 # appimagetool identifies the payload's architecture with file(1).
-apt-get install -y --no-install-recommends file
+apt-get install -y --no-install-recommends file python3
 cat /etc/os-release > "$out/evidence/os-release.txt"
 dpkg-query -W > "$out/evidence/packages.txt"
 
@@ -46,6 +46,16 @@ cargo -V > "$out/evidence/cargo.txt"
 pkg-config --modversion libpipewire-0.3 > "$out/evidence/pipewire-headers.txt"
 cargo build --release --locked
 cp Cargo.lock "$out/evidence/Cargo.lock"
+
+# Keep the pinned reporting tool cached separately from the application build.
+license_tools=$repo/target/license-tools
+if [[ $("$license_tools/bin/cargo-about" --version 2>/dev/null || true) != "cargo-about 0.9.3" ]]; then
+    CARGO_TARGET_DIR=$repo/target/license-build cargo install --locked \
+        --root "$license_tools" --version 0.9.3 --features cli cargo-about
+fi
+CARGO_ABOUT="$license_tools/bin/cargo-about" python3 packaging/licenses/generate.py \
+    --out "$out/licenses"
+cp "$out/licenses/dependencies.json" "$out/evidence/dependencies.json"
 
 bin=$CARGO_TARGET_DIR/release/esquie
 version=$("$bin" --version | awk '{print $2}')
@@ -85,6 +95,10 @@ appdir=$work/AppDir
     --exclude-library 'libbz2.so*' \
     --exclude-library 'libbrotli*.so*' \
     2>&1 | tee "$out/evidence/linuxdeploy.log"
+
+# Package the generated notices after linuxdeploy has assembled the AppDir.
+mkdir -p "$appdir/usr/share/doc/esquie"
+cp -a "$out/licenses/." "$appdir/usr/share/doc/esquie/"
 
 appimage=$out/Esquie-$version-x86_64.AppImage
 ARCH=x86_64 "$work/tools/appimagetool/AppRun" --no-appstream \

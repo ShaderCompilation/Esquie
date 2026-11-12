@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible problem in Esquie.
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues first. Review and redact diagnostics before attaching them. Recordings are optional. Please obtain maintainer approval before starting a code contribution.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Esquie version and installation type; distro; desktop and Wayland/X11; PipeWire/WirePlumber versions; microphone type.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include whether it also happens with noise removal disabled.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Additional information or reviewed diagnostics
+      description: Export from Settings → Diagnostics if helpful. Remove personal paths and device details you do not want public.

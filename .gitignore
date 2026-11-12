@@ -1,1 +1,4 @@
-/target
+/target/
+/.private/
+/AGENTS.md
+__pycache__/

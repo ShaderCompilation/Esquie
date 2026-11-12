@@ -1,0 +1,10 @@
+# Prefer MIT where upstream offers a choice; use GPLv3 for Slint.
+accepted = [
+    "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib",
+    "Unicode-3.0", "Unlicense", "CC0-1.0", "0BSD",
+    "Apache-2.0 WITH LLVM-exception", "GPL-3.0-only",
+]
+targets = ["x86_64-unknown-linux-gnu"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
+workarounds = ["ring", "rustls", "tract", "unicode-ident", "rustix", "linux-raw-sys"]

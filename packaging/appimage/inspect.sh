@@ -26,6 +26,16 @@ root=$tmp/squashfs-root
 for path in AppRun .DirIcon esquie.desktop esquie.svg usr/bin/esquie; do
     [[ -e $root/$path ]] || fail "missing $path"
 done
+doc=$root/usr/share/doc/esquie
+for name in LICENSE THIRD_PARTY_NOTICES.md dependencies.html cargo-notices.html \
+    dependencies.json Cargo.lock license-sources.json deepfilternet.txt \
+    appimage-runtime.txt appimage-runtime-source-header.txt musl.txt \
+    libfuse-LGPL-2.1.txt libfuse-GPL-2.0.txt squashfuse.txt zstd.txt zlib.txt mimalloc.txt; do
+    [[ -s $doc/$name ]] || fail "missing or empty license documentation: $name"
+done
+grep -q 'GNU GENERAL PUBLIC LICENSE' "$doc/LICENSE" || fail "missing GPL license text"
+grep -q 'Esquie dependency licenses' "$doc/dependencies.html" || fail "missing dependency licenses"
+
 grep -qx 'Exec=esquie' "$root/esquie.desktop" || fail "desktop entry Exec is not 'esquie'"
 grep -qx 'Icon=esquie' "$root/esquie.desktop" || fail "desktop entry Icon is not 'esquie'"
 [[ $(readlink "$root/AppRun") == usr/bin/esquie ]] \
