@@ -19,8 +19,11 @@ current scope.
 Compatibility work focuses on installation and dependencies across distributions,
 Wayland and X11 desktop sessions, operation with or without a system tray, and
 audio recovery after device changes, suspend/resume, or PipeWire restarts.
-[Clean builds and automated checks pass across the initial distro matrix](docs/phase1-validation.md);
-desktop and audio recovery coverage still needs validation.
+[Clean builds and automated checks pass across the initial distro matrix](docs/phase1-validation.md).
+Esquie waits for PipeWire if it starts first, reconnects after PipeWire or
+WirePlumber restarts, and falls back to another microphone while the selected
+one is unplugged ([recovery checks](docs/phase2-validation.md)). Desktop and
+hardware coverage still needs validation.
 
 ## Build & run
 

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use audio::{Command, Event, PreviewMode, Shared};
+use audio::{Command, Event, PreviewMode, Shared, Status};
 use settings::{strength_to_db, Settings};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
@@ -83,7 +83,7 @@ fn main() -> anyhow::Result<()> {
             if let Err(e) = audio::run(shared, mic, cmd_rx, notify) {
                 let msg = format!("Audio engine failed: {e:#}");
                 eprintln!("{msg}");
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_error(msg.into()));
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| apply_event(&ui, Event::Status(Status::Failed(msg))));
             }
         })?
     };
@@ -235,11 +235,24 @@ fn apply_event(ui: &AppWindow, event: Event) {
             ui.set_mic_names(ModelRc::new(VecModel::from(names)));
             ui.set_mics(ModelRc::new(VecModel::from(labels)));
             ui.set_mic_index(index);
-            ui.set_ready(true);
-            ui.set_error(SharedString::new());
         }
         Event::Users(users) => ui.set_users(users.join(", ").into()),
-        Event::Error(msg) => ui.set_error(msg.into()),
+        Event::Status(status) => {
+            let (kind, message) = match status {
+                Status::Connecting => (AudioStatus::Connecting, String::new()),
+                Status::Disconnected(_) => (
+                    AudioStatus::Disconnected,
+                    "Waiting for the audio server (PipeWire). Esquie reconnects automatically.".to_string(),
+                ),
+                Status::NoMicrophone => (AudioStatus::NoMicrophone, String::new()),
+                Status::NoRoute(msg) => (AudioStatus::NoRoute, format!("{msg} Retrying automatically.")),
+                Status::Ready => (AudioStatus::Ready, String::new()),
+                Status::Failed(msg) => (AudioStatus::Failed, msg),
+            };
+            ui.set_audio_status(kind);
+            ui.set_status_message(message.into());
+        }
+        Event::PreviewError(msg) => ui.set_test_error(msg.unwrap_or_default().into()),
     }
 }
 

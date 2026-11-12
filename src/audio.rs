@@ -2,14 +2,21 @@
 //! result into a virtual "Esquie" source that other apps can pick as a mic.
 //!
 //! Everything here runs on one PipeWire main-loop thread (no RT_PROCESS), so
-//! the two streams can share the engine through a plain Rc<RefCell<..>>.
+//! the streams can share the engine through a plain Rc<RefCell<..>>.
+//!
+//! The main loop, command receiver and processing engine live for the whole
+//! run. Everything tied to one server connection (core, registry, metadata,
+//! streams and their listeners) lives in a `Conn`, which is torn down and
+//! rebuilt when the server goes away. PipeWire callbacks only record what
+//! happened; a periodic tick performs teardown and retries, so no object is
+//! destroyed from inside its own callback.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use df::tract::{DfParams, DfTract, RuntimeParams};
@@ -17,7 +24,7 @@ use ndarray::{ArrayView2, ArrayViewMut2};
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
-use pw::stream::{StreamFlags, StreamListener, StreamRc};
+use pw::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 
 use crate::dsp::{Gate, HighPass, Tuning};
 
@@ -126,7 +133,28 @@ pub enum Event {
     Mics { list: Vec<Mic>, active: Option<String> },
     /// Apps currently reading the virtual mic.
     Users(Vec<String>),
-    Error(String),
+    /// Overall engine state; drives readiness and the main error banner.
+    Status(Status),
+    /// Problem with the test section (speakers), or `None` once it is gone.
+    /// Never affects the live microphone's status.
+    PreviewError(Option<String>),
+}
+
+/// What the live audio path is doing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Connecting to the server or waiting for a microphone's audio to arrive.
+    Connecting,
+    /// The audio server is unreachable; retrying automatically.
+    Disconnected(String),
+    /// Connected, but there is no microphone to capture.
+    NoMicrophone,
+    /// A microphone is selected, but its audio does not reach Esquie.
+    NoRoute(String),
+    /// Capturing and publishing the virtual mic.
+    Ready,
+    /// Initialization failed; Esquie must be restarted.
+    Failed(String),
 }
 
 /// The full cleaning chain for one stream: high-pass -> DeepFilterNet -> gate.
@@ -202,6 +230,19 @@ impl Cleaner {
     fn reset(&mut self) {
         self.hpf.reset();
         self.gate.reset();
+    }
+
+    /// Forget all audio history, including the model's look-ahead, so nothing
+    /// from a previous input or connection leaks into new output.
+    fn flush(&mut self) {
+        const FRAMES: usize = 8; // more than the model's look-ahead and DF order
+        let hop = self.buf.len();
+        let silence = vec![0.0; hop];
+        let mut out = vec![0.0; hop];
+        for _ in 0..FRAMES {
+            self.process(&silence, &mut out);
+        }
+        self.reset();
     }
 }
 
@@ -374,6 +415,23 @@ impl Engine {
         }
     }
 
+    /// Drop everything queued or in flight and stop any test, e.g. after a
+    /// disconnect or input change. Keeps a finished recording for playback.
+    fn clear_audio(&mut self) {
+        self.input.clear();
+        self.queue.clear();
+        self.primed = false;
+        self.cleaner.flush();
+        self.shared.in_level.store(0, Ordering::Relaxed);
+        self.shared.out_level.store(0, Ordering::Relaxed);
+        if self.preview.mode == PreviewMode::Recording {
+            self.preview.clip.clear();
+            self.shared.clip_len.store(0, Ordering::Relaxed);
+        }
+        self.shared.play_pos.store(0, Ordering::Relaxed);
+        self.preview.set_mode(PreviewMode::Idle, &self.shared);
+    }
+
     fn start_recording(&mut self) {
         self.preview.clip.clear();
         self.shared.clip_len.store(0, Ordering::Relaxed);
@@ -395,7 +453,7 @@ impl Engine {
     }
 }
 
-/// Set ESQUIE_DEBUG=1 to log underruns to stderr.
+/// Set ESQUIE_DEBUG=1 to log underruns, status changes and retries to stderr.
 fn debug() -> bool {
     static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DEBUG.get_or_init(|| std::env::var_os("ESQUIE_DEBUG").is_some())
@@ -423,40 +481,557 @@ fn mono_f32_params() -> Vec<u8> {
     .into_inner()
 }
 
-struct State {
+/// How often the audio thread checks timers, retries and pending teardown.
+const TICK: Duration = Duration::from_millis(50);
+/// A capture stream that has not delivered audio by then has no usable route.
+const ROUTE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Delay before retry number `attempt` (0-based): 250 ms, 500 ms, 1 s, 2 s,
+/// then every 5 s.
+fn retry_delay(attempt: u32) -> Duration {
+    const STEPS_MS: [u64; 4] = [250, 500, 1_000, 2_000];
+    Duration::from_millis(STEPS_MS.get(attempt as usize).copied().unwrap_or(5_000))
+}
+
+/// Retry schedule with exponential backoff.
+#[derive(Default)]
+struct Backoff {
+    attempt: u32,
+    due: Option<Instant>,
+}
+
+impl Backoff {
+    /// Schedule the next retry unless one is already pending.
+    fn schedule(&mut self, now: Instant) {
+        if self.due.is_none() {
+            self.due = Some(now + retry_delay(self.attempt));
+            self.attempt = self.attempt.saturating_add(1);
+        }
+    }
+    /// Returns true (and clears the schedule) once the retry is due.
+    fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.due.is_some_and(|d| now >= d);
+        if due {
+            self.due = None;
+        }
+        due
+    }
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// The microphone to capture, in order of preference: the saved choice, the
+/// system default, the current fallback (to avoid switching when unrelated
+/// devices come and go), then the first by node name. Esquie's own virtual
+/// mic is never chosen.
+fn choose_mic(
+    mics: &[&str],
+    preferred: Option<&str>,
+    system_default: Option<&str>,
+    current: Option<&str>,
+) -> Option<String> {
+    let usable = |n: &&str| *n != VIRTUAL_NODE_NAME && mics.contains(n);
+    preferred
+        .filter(usable)
+        .or(system_default.filter(usable))
+        .or(current.filter(usable))
+        .or_else(|| mics.iter().copied().filter(|n| *n != VIRTUAL_NODE_NAME).min())
+        .map(str::to_owned)
+}
+
+/// Parse the node name out of default-device metadata like {"name":"alsa_input.foo"}.
+fn parse_default_name(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let name = value.get("name")?.as_str()?;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// Default-device metadata value naming `name`.
+fn default_json(name: &str) -> String {
+    serde_json::json!({ "name": name }).to_string()
+}
+
+/// A stream with its listener. The listener is declared first so it is
+/// removed before the stream is destroyed, which keeps the stream from
+/// calling back into us during teardown.
+struct Stream {
+    _listener: StreamListener<()>,
+    _stream: StreamRc,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CaptureState {
+    /// No capture stream.
+    Idle,
+    /// Created; waiting for audio to flow since the given time.
+    Waiting(Instant),
+    Streaming,
+    Failed(String),
+}
+
+/// Everything belonging to one server connection.
+struct Conn {
+    /// Weak self-reference for this connection's own callbacks (no cycles).
+    weak: std::rc::Weak<Conn>,
     core: pw::core::CoreRc,
-    engine: Rc<RefCell<Engine>>,
-    capture: RefCell<Option<(StreamRc, StreamListener<()>)>>,
+    /// Taken down explicitly, in order, by `teardown`.
+    core_listener: RefCell<Option<pw::core::Listener>>,
+    registry: RefCell<Option<(pw::registry::Listener, pw::registry::RegistryRc)>>,
+    metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
+    source: RefCell<Option<Stream>>,
+    capture: RefCell<Option<Stream>>,
+    /// Speaker stream for the test section; exists only while testing.
+    preview: RefCell<Option<Stream>>,
+    /// Sequence number of the pending initial round trip, and rounds done.
+    sync_seq: Cell<i32>,
+    sync_rounds: Cell<u8>,
+    /// Initial enumeration is complete.
+    synced: Cell<bool>,
     mics: RefCell<Vec<(u32, Mic)>>,
     active: RefCell<Option<String>>,
-    preferred: RefCell<Option<String>>,      // mic the user picked (saved)
-    system_default: RefCell<Option<String>>, // system default mic, used until the user picks one
+    capture_state: RefCell<CaptureState>,
+    /// Set by the preview stream's callback; handled by the tick.
+    preview_failed: RefCell<Option<String>>,
+    /// System default mic (never our own virtual mic).
+    system_default: RefCell<Option<String>>,
     /// We've heard what the system default is (so we don't overwrite it blind).
     default_known: Cell<bool>,
     /// The system default is our own virtual mic.
     default_is_virtual: Cell<bool>,
-    /// The picked mic has been made the system default, so the desktop's mic
-    /// volume slider controls it. Done once per pick, so we never fight the
-    /// user changing the default elsewhere afterwards.
-    default_synced: Cell<bool>,
-    metadata: RefCell<Option<(pw::metadata::Metadata, pw::metadata::MetadataListener)>>,
-    /// Speaker stream for the test section; exists only while testing.
-    preview: RefCell<Option<(StreamRc, StreamListener<()>)>>,
     /// Registry id of our virtual mic node.
     virtual_id: Cell<Option<u32>>,
     /// Recording streams (apps) by node id, with a display name.
     apps: RefCell<HashMap<u32, String>>,
     /// Links from our virtual mic: link id -> input node id.
     links: RefCell<HashMap<u32, u32>>,
-    users: RefCell<Vec<String>>,
-    notify: Box<dyn Fn(Event)>,
 }
 
-impl State {
-    fn send_users(&self) {
-        let apps = self.apps.borrow();
-        let mut users: Vec<String> =
-            self.links.borrow().values().filter_map(|n| apps.get(n).cloned()).collect();
+impl Conn {
+    fn new(core: pw::core::CoreRc) -> Rc<Self> {
+        Rc::new_cyclic(|weak| Self {
+            weak: weak.clone(),
+            core,
+            core_listener: RefCell::new(None),
+            registry: RefCell::new(None),
+            metadata: RefCell::new(None),
+            source: RefCell::new(None),
+            capture: RefCell::new(None),
+            preview: RefCell::new(None),
+            sync_seq: Cell::new(-1),
+            sync_rounds: Cell::new(0),
+            synced: Cell::new(false),
+            mics: RefCell::new(Vec::new()),
+            active: RefCell::new(None),
+            capture_state: RefCell::new(CaptureState::Idle),
+            preview_failed: RefCell::new(None),
+            system_default: RefCell::new(None),
+            default_known: Cell::new(false),
+            default_is_virtual: Cell::new(false),
+            virtual_id: Cell::new(None),
+            apps: RefCell::new(HashMap::new()),
+            links: RefCell::new(HashMap::new()),
+        })
+    }
+
+    fn has_mic(&self, name: &str) -> bool {
+        self.mics.borrow().iter().any(|(_, m)| m.name == name)
+    }
+
+    /// Destroy streams and proxies before the core goes away with `self`.
+    fn teardown(&self) {
+        self.capture.replace(None);
+        self.preview.replace(None);
+        self.source.replace(None);
+        self.metadata.replace(None);
+        self.registry.replace(None);
+        self.core_listener.replace(None);
+    }
+}
+
+/// State that survives reconnects.
+struct App {
+    context: pw::context::ContextRc,
+    engine: Rc<RefCell<Engine>>,
+    notify: Box<dyn Fn(Event)>,
+    conn: RefCell<Option<Rc<Conn>>>,
+    /// Mic the user picked (saved). Kept while falling back to another mic.
+    preferred: RefCell<Option<String>>,
+    /// The picked mic has been made the system default, so the desktop's mic
+    /// volume slider controls it. Done once per explicit pick (or once at
+    /// startup for the saved pick), never again on reconnects or fallbacks,
+    /// so we don't fight the user changing the default elsewhere.
+    default_synced: Cell<bool>,
+    /// Set from callbacks when the connection is lost; the tick tears down.
+    lost: RefCell<Option<String>>,
+    /// Why the server is unavailable, until a connection succeeds.
+    server_error: RefCell<Option<String>>,
+    reconnect: RefCell<Backoff>,
+    capture_retry: RefCell<Backoff>,
+    status: RefCell<Option<Status>>,
+    users: RefCell<Vec<String>>,
+}
+
+impl App {
+    fn current(&self) -> Option<Rc<Conn>> {
+        self.conn.borrow().clone()
+    }
+
+    // ── Connection lifecycle ───────────────────────────────────────────────
+
+    fn connect(self: &Rc<Self>) {
+        match self.try_connect() {
+            Ok(conn) => {
+                self.conn.replace(Some(conn));
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if debug() {
+                    eprintln!("PipeWire connection failed: {msg}");
+                }
+                self.server_error.replace(Some(msg));
+                self.reconnect.borrow_mut().schedule(Instant::now());
+            }
+        }
+    }
+
+    fn try_connect(self: &Rc<Self>) -> Result<Rc<Conn>> {
+        let core = self.context.connect_rc(None).context("connecting to PipeWire")?;
+        let conn = Conn::new(core);
+        let result = self.setup(&conn);
+        if result.is_err() {
+            conn.teardown();
+        }
+        result.map(|()| conn)
+    }
+
+    fn setup(self: &Rc<Self>, conn: &Rc<Conn>) -> Result<()> {
+        let weak_app = Rc::downgrade(self);
+        let weak_conn = Rc::downgrade(conn);
+        let error_app = weak_app.clone();
+        let listener = conn
+            .core
+            .add_listener_local()
+            .error(move |id, _seq, res, message| {
+                if id != pw::core::PW_ID_CORE {
+                    if debug() {
+                        eprintln!("PipeWire error on object {id}: {message} ({res})");
+                    }
+                    return;
+                }
+                if let Some(app) = error_app.upgrade() {
+                    let mut lost = app.lost.borrow_mut();
+                    if lost.is_none() {
+                        *lost = Some(format!("{message} ({res})"));
+                    }
+                }
+            })
+            .done(move |id, seq| {
+                let (Some(app), Some(conn)) = (weak_app.upgrade(), weak_conn.upgrade()) else { return };
+                if id == pw::core::PW_ID_CORE && seq.seq() == conn.sync_seq.get() {
+                    app.on_sync_done(&conn);
+                }
+            })
+            .register();
+        conn.core_listener.replace(Some(listener));
+
+        conn.source.replace(Some(self.make_source(conn)?));
+
+        let registry = conn.core.get_registry_rc()?;
+        let registry_weak = registry.downgrade();
+        let (app1, conn1) = (Rc::downgrade(self), Rc::downgrade(conn));
+        let (app2, conn2) = (app1.clone(), conn1.clone());
+        let listener = registry
+            .add_listener_local()
+            .global(move |obj| {
+                let (Some(app), Some(conn), Some(registry)) =
+                    (app1.upgrade(), conn1.upgrade(), registry_weak.upgrade())
+                else {
+                    return;
+                };
+                app.on_global(&conn, &registry, obj);
+            })
+            .global_remove(move |id| {
+                if let (Some(app), Some(conn)) = (app2.upgrade(), conn2.upgrade()) {
+                    app.on_global_removed(&conn, id);
+                }
+            })
+            .register();
+        conn.registry.replace(Some((listener, registry)));
+
+        conn.sync_seq.set(conn.core.sync(0)?.seq());
+        Ok(())
+    }
+
+    /// Two round trips: the first delivers all globals, the second the
+    /// replies to what we bound in response (the default-device metadata).
+    fn on_sync_done(&self, conn: &Conn) {
+        conn.sync_rounds.set(conn.sync_rounds.get() + 1);
+        if conn.sync_rounds.get() < 2 {
+            match conn.core.sync(0) {
+                Ok(seq) => {
+                    conn.sync_seq.set(seq.seq());
+                    return;
+                }
+                Err(e) => eprintln!("PipeWire sync failed: {e}"),
+            }
+        }
+        conn.sync_seq.set(-1);
+        conn.synced.set(true);
+        self.reconnect.borrow_mut().reset();
+        self.server_error.replace(None);
+        self.sync_default(conn);
+        self.reselect(conn, false);
+    }
+
+    /// Tear the connection down and forget everything learned from it.
+    fn disconnect(&self, reason: String) {
+        eprintln!("Lost connection to PipeWire: {reason}");
+        if let Some(conn) = self.conn.take() {
+            conn.teardown();
+        }
+        self.server_error.replace(Some(reason));
+        self.capture_retry.borrow_mut().reset();
+        self.engine.borrow_mut().clear_audio();
+        (self.notify)(Event::Mics { list: Vec::new(), active: None });
+        self.set_users(Vec::new());
+    }
+
+    /// Periodic work, run outside PipeWire callbacks.
+    fn tick(self: &Rc<Self>) {
+        let now = Instant::now();
+        let lost = self.lost.take();
+        if let Some(reason) = lost {
+            self.disconnect(reason);
+            self.reconnect.borrow_mut().schedule(now);
+        }
+        if self.conn.borrow().is_none() {
+            let due = self.reconnect.borrow_mut().take_due(now);
+            if due {
+                self.connect();
+            }
+        }
+        if let Some(conn) = self.current() {
+            self.check_capture(&conn, now);
+            self.check_preview(&conn);
+        }
+        self.update_status(now);
+    }
+
+    fn check_capture(&self, conn: &Conn, now: Instant) {
+        if !conn.synced.get() {
+            return;
+        }
+        let state = conn.capture_state.borrow().clone();
+        match state {
+            CaptureState::Streaming => self.capture_retry.borrow_mut().reset(),
+            CaptureState::Failed(_) => self.capture_retry.borrow_mut().schedule(now),
+            CaptureState::Waiting(since) if now - since >= ROUTE_TIMEOUT => {
+                self.capture_retry.borrow_mut().schedule(now)
+            }
+            CaptureState::Waiting(_) | CaptureState::Idle => {}
+        }
+        let due = self.capture_retry.borrow_mut().take_due(now);
+        if due {
+            self.reselect(conn, true);
+        }
+    }
+
+    fn compute_status(&self, now: Instant) -> Status {
+        let Some(conn) = self.current().filter(|c| c.synced.get()) else {
+            return match self.server_error.borrow().clone() {
+                Some(e) => Status::Disconnected(e),
+                None => Status::Connecting,
+            };
+        };
+        if conn.mics.borrow().is_empty() {
+            return Status::NoMicrophone;
+        }
+        let retrying = self.capture_retry.borrow().attempt > 0;
+        let state = conn.capture_state.borrow().clone();
+        match state {
+            CaptureState::Streaming => Status::Ready,
+            CaptureState::Failed(msg) => Status::NoRoute(msg),
+            CaptureState::Waiting(since) if retrying || now - since >= ROUTE_TIMEOUT => {
+                Status::NoRoute(format!("{} is not sending audio to Esquie.", self.active_label(&conn)))
+            }
+            CaptureState::Waiting(_) | CaptureState::Idle => Status::Connecting,
+        }
+    }
+
+    fn update_status(&self, now: Instant) {
+        let status = self.compute_status(now);
+        if self.status.borrow().as_ref() != Some(&status) {
+            if debug() {
+                eprintln!("status: {status:?}");
+            }
+            self.status.replace(Some(status.clone()));
+            (self.notify)(Event::Status(status));
+        }
+    }
+
+    fn active_label(&self, conn: &Conn) -> String {
+        let active = conn.active.borrow();
+        let mics = conn.mics.borrow();
+        let found = mics.iter().find(|(_, m)| Some(&m.name) == active.as_ref());
+        match found {
+            Some((_, m)) => format!("“{}”", m.description),
+            None => "The microphone".to_string(),
+        }
+    }
+
+    // ── Registry ───────────────────────────────────────────────────────────
+
+    fn on_global(
+        self: &Rc<Self>,
+        conn: &Rc<Conn>,
+        registry: &pw::registry::RegistryRc,
+        obj: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
+    ) {
+        let Some(props) = obj.props else { return };
+        if obj.type_ == pw::types::ObjectType::Metadata && props.get("metadata.name") == Some("default") {
+            self.bind_metadata(conn, registry, obj);
+            return;
+        }
+        if obj.type_ == pw::types::ObjectType::Link {
+            let node = |k| props.get(k).and_then(|v| v.parse::<u32>().ok());
+            if let (Some(out), Some(input)) = (node("link.output.node"), node("link.input.node")) {
+                if Some(out) == conn.virtual_id.get() {
+                    conn.links.borrow_mut().insert(obj.id, input);
+                    self.send_users(conn);
+                }
+            }
+            return;
+        }
+        if obj.type_ != pw::types::ObjectType::Node {
+            return;
+        }
+        if props.get("media.class") == Some("Stream/Input/Audio") {
+            let app = props
+                .get("application.name")
+                .or(props.get("node.description"))
+                .or(props.get("node.name"))
+                .unwrap_or("An app");
+            conn.apps.borrow_mut().insert(obj.id, app.to_string());
+            self.send_users(conn);
+            return;
+        }
+        if props.get("media.class") != Some("Audio/Source") {
+            return;
+        }
+        let Some(name) = props.get("node.name") else { return };
+        if name == VIRTUAL_NODE_NAME {
+            conn.virtual_id.set(Some(obj.id));
+            return;
+        }
+        let description = props.get("node.description").or(props.get("node.nick")).unwrap_or(name).to_string();
+        conn.mics.borrow_mut().push((obj.id, Mic { name: name.to_string(), description }));
+        if conn.synced.get() {
+            self.sync_default(conn);
+            self.reselect(conn, false);
+        }
+    }
+
+    /// (Re)bind the default-device metadata, replacing any earlier object,
+    /// e.g. after the session manager restarts.
+    fn bind_metadata(
+        self: &Rc<Self>,
+        conn: &Rc<Conn>,
+        registry: &pw::registry::RegistryRc,
+        obj: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
+    ) {
+        conn.metadata.replace(None);
+        conn.default_known.set(false);
+        let metadata = match registry.bind::<pw::metadata::Metadata, _>(obj) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("Could not bind default-device metadata: {e}");
+                return;
+            }
+        };
+        let (app, weak_conn) = (Rc::downgrade(self), Rc::downgrade(conn));
+        let listener = metadata
+            .add_listener_local()
+            .property(move |subject, key, _type, value| {
+                let (Some(app), Some(conn)) = (app.upgrade(), weak_conn.upgrade()) else { return 0 };
+                // A `None` key means all properties were cleared.
+                if subject == pw::core::PW_ID_CORE && matches!(key, None | Some("default.audio.source")) {
+                    app.on_default_changed(&conn, value.and_then(parse_default_name));
+                }
+                0
+            })
+            .register();
+        conn.metadata.replace(Some((obj.id, listener, metadata)));
+    }
+
+    fn on_global_removed(self: &Rc<Self>, conn: &Rc<Conn>, id: u32) {
+        let link = conn.links.borrow_mut().remove(&id).is_some();
+        let app = conn.apps.borrow_mut().remove(&id).is_some();
+        if link || app {
+            self.send_users(conn);
+            return;
+        }
+        let is_metadata = conn.metadata.borrow().as_ref().is_some_and(|(mid, ..)| *mid == id);
+        if is_metadata {
+            // Removed from the server; a replacement is bound when it appears.
+            conn.metadata.replace(None);
+            conn.default_known.set(false);
+            return;
+        }
+        if conn.virtual_id.get() == Some(id) {
+            conn.virtual_id.set(None);
+            conn.links.borrow_mut().clear();
+            self.send_users(conn);
+            return;
+        }
+        let removed = {
+            let mut mics = conn.mics.borrow_mut();
+            let found = mics.iter().position(|(mid, _)| *mid == id);
+            found.map(|i| mics.remove(i))
+        };
+        if removed.is_some() && conn.synced.get() {
+            self.reselect(conn, false);
+        }
+    }
+
+    fn on_default_changed(self: &Rc<Self>, conn: &Rc<Conn>, name: Option<String>) {
+        conn.default_known.set(true);
+        conn.default_is_virtual.set(name.as_deref() == Some(VIRTUAL_NODE_NAME));
+        conn.system_default.replace(name.filter(|n| n != VIRTUAL_NODE_NAME));
+        if conn.synced.get() {
+            self.sync_default(conn);
+            self.reselect(conn, false);
+        }
+    }
+
+    /// Make the explicitly picked mic the system default (see `default_synced`).
+    fn sync_default(&self, conn: &Conn) {
+        if self.default_synced.get() || !conn.default_known.get() {
+            return;
+        }
+        let Some(wanted) = self.preferred.borrow().clone() else { return };
+        if !conn.has_mic(&wanted) {
+            return; // not plugged in; try again when it shows up
+        }
+        let metadata = conn.metadata.borrow();
+        let Some((_, _, metadata)) = metadata.as_ref() else { return };
+        self.default_synced.set(true);
+        if conn.default_is_virtual.get() || conn.system_default.borrow().as_deref() == Some(&wanted) {
+            return;
+        }
+        let value = default_json(&wanted);
+        metadata.set_property(0, "default.configured.audio.source", Some("Spa:String:JSON"), Some(&value));
+    }
+
+    fn send_users(&self, conn: &Conn) {
+        let users: Vec<String> = {
+            let apps = conn.apps.borrow();
+            conn.links.borrow().values().filter_map(|n| apps.get(n).cloned()).collect()
+        };
+        self.set_users(users);
+    }
+
+    fn set_users(&self, mut users: Vec<String>) {
         users.sort();
         users.dedup();
         if *self.users.borrow() != users {
@@ -465,25 +1040,210 @@ impl State {
         }
     }
 
-    fn ensure_preview_stream(&self) -> bool {
-        if self.preview.borrow().is_some() {
+    fn send_mics(&self, conn: &Conn) {
+        let mut list: Vec<Mic> = conn.mics.borrow().iter().map(|(_, m)| m.clone()).collect();
+        list.sort_by(|a, b| a.description.cmp(&b.description).then_with(|| a.name.cmp(&b.name)));
+        (self.notify)(Event::Mics { list, active: conn.active.borrow().clone() });
+    }
+
+    // ── Capture ────────────────────────────────────────────────────────────
+
+    /// Capture the mic `choose_mic` picks. With `force`, restart capture even
+    /// if that mic is already active (used to retry a broken route).
+    fn reselect(&self, conn: &Conn, force: bool) {
+        let wanted = {
+            let mics = conn.mics.borrow();
+            let names: Vec<&str> = mics.iter().map(|(_, m)| m.name.as_str()).collect();
+            choose_mic(
+                &names,
+                self.preferred.borrow().as_deref(),
+                conn.system_default.borrow().as_deref(),
+                conn.active.borrow().as_deref(),
+            )
+        };
+        let changed = wanted != *conn.active.borrow();
+        if changed {
+            self.capture_retry.borrow_mut().reset();
+        }
+        if changed || force {
+            match wanted {
+                Some(name) => self.start_capture(conn, &name),
+                None => self.stop_capture(conn),
+            }
+        }
+        self.send_mics(conn);
+    }
+
+    fn start_capture(&self, conn: &Conn, target: &str) {
+        conn.capture.replace(None); // drop the old stream first
+        self.reset_audio(conn);
+        conn.active.replace(Some(target.to_string()));
+        conn.capture_state.replace(CaptureState::Waiting(Instant::now()));
+        match self.make_capture(conn, target) {
+            Ok(stream) => {
+                conn.capture.replace(Some(stream));
+            }
+            Err(e) => {
+                let msg = format!("Could not open {}: {e:#}", self.active_label(conn));
+                eprintln!("{msg}");
+                conn.capture_state.replace(CaptureState::Failed(msg));
+            }
+        }
+    }
+
+    fn stop_capture(&self, conn: &Conn) {
+        conn.capture.replace(None);
+        conn.active.replace(None);
+        conn.capture_state.replace(CaptureState::Idle);
+        self.reset_audio(conn);
+    }
+
+    /// Clear queued audio and stop any test when the input changes.
+    fn reset_audio(&self, conn: &Conn) {
+        conn.preview.replace(None);
+        conn.preview_failed.replace(None);
+        self.engine.borrow_mut().clear_audio();
+    }
+
+    fn make_source(self: &Rc<Self>, conn: &Conn) -> Result<Stream> {
+        let stream = StreamRc::new(
+            conn.core.clone(),
+            "esquie",
+            properties! {
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CLASS => "Audio/Source",
+                *pw::keys::NODE_NAME => VIRTUAL_NODE_NAME,
+                *pw::keys::NODE_DESCRIPTION => "Esquie (noise removed)",
+                "node.group" => "esquie",
+                "node.latency" => "480/48000",
+            },
+        )?;
+        let engine = self.engine.clone();
+        let app = Rc::downgrade(self);
+        let listener = stream
+            .add_local_listener_with_user_data(())
+            .state_changed(move |_, _, _old, new| {
+                // Paused just means no app is reading the virtual mic.
+                if let (StreamState::Error(msg), Some(app)) = (new, app.upgrade()) {
+                    let mut lost = app.lost.borrow_mut();
+                    if lost.is_none() {
+                        *lost = Some(format!("virtual microphone failed: {msg}"));
+                    }
+                }
+            })
+            .process(move |stream, _| {
+                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let requested = buffer.requested() as usize;
+                let datas = buffer.datas_mut();
+                let Some(data) = datas.first_mut() else { return };
+                let mut n = 0;
+                if let Some(bytes) = data.data() {
+                    let out = bytemuck_f32_mut(bytes);
+                    n = if requested > 0 { requested.min(out.len()) } else { out.len() };
+                    engine.borrow_mut().pull_output(&mut out[..n]);
+                }
+                let chunk = data.chunk_mut();
+                *chunk.offset_mut() = 0;
+                *chunk.stride_mut() = 4;
+                *chunk.size_mut() = (n * 4) as u32;
+            })
+            .register()?;
+        let params = mono_f32_params();
+        stream.connect(
+            spa::utils::Direction::Output,
+            None,
+            StreamFlags::MAP_BUFFERS,
+            &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
+        )?;
+        Ok(Stream { _listener: listener, _stream: stream })
+    }
+
+    fn make_capture(&self, conn: &Conn, target: &str) -> Result<Stream> {
+        let stream = StreamRc::new(
+            conn.core.clone(),
+            "esquie-input",
+            properties! {
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CATEGORY => "Capture",
+                *pw::keys::MEDIA_ROLE => "Communication",
+                *pw::keys::NODE_NAME => "esquie-input",
+                *pw::keys::NODE_DESCRIPTION => "Esquie input",
+                *pw::keys::TARGET_OBJECT => target,
+                "node.dont-reconnect" => "true",
+                "node.group" => "esquie",
+                "node.latency" => "480/48000",
+            },
+        )?;
+        let engine = self.engine.clone();
+        let weak_conn = conn.weak.clone();
+        let label = self.active_label(conn);
+        let listener = stream
+            .add_local_listener_with_user_data(())
+            .state_changed(move |_, _, _old, new| {
+                let Some(conn) = weak_conn.upgrade() else { return };
+                let next = match new {
+                    StreamState::Streaming => CaptureState::Streaming,
+                    StreamState::Error(msg) => CaptureState::Failed(format!("Could not use {label}: {msg}")),
+                    StreamState::Unconnected => CaptureState::Failed(format!("{label} was disconnected.")),
+                    // Lost its link (e.g. the session manager restarted): wait again.
+                    StreamState::Paused | StreamState::Connecting => {
+                        if *conn.capture_state.borrow() != CaptureState::Streaming {
+                            return;
+                        }
+                        CaptureState::Waiting(Instant::now())
+                    }
+                };
+                conn.capture_state.replace(next);
+            })
+            .process(move |stream, _| {
+                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let datas = buffer.datas_mut();
+                let Some(data) = datas.first_mut() else { return };
+                let size = data.chunk().size() as usize;
+                let offset = data.chunk().offset() as usize;
+                if let Some(bytes) = data.data() {
+                    let end = (offset + size).min(bytes.len());
+                    let samples: &[f32] = bytemuck_f32(&bytes[offset.min(end)..end]);
+                    engine.borrow_mut().push_input(samples);
+                }
+            })
+            .register()?;
+        let params = mono_f32_params();
+        let pod = spa::pod::Pod::from_bytes(&params).unwrap();
+        stream.connect(
+            spa::utils::Direction::Input,
+            None,
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            &mut [pod],
+        )?;
+        Ok(Stream { _listener: listener, _stream: stream })
+    }
+
+    // ── Test section ───────────────────────────────────────────────────────
+
+    fn preview_error(&self, msg: Option<String>) {
+        (self.notify)(Event::PreviewError(msg));
+    }
+
+    fn ensure_preview_stream(&self, conn: &Conn) -> bool {
+        if conn.preview.borrow().is_some() {
             return true;
         }
-        match self.make_preview() {
+        match self.make_preview(conn) {
             Ok(p) => {
-                self.preview.replace(Some(p));
+                conn.preview.replace(Some(p));
                 true
             }
             Err(e) => {
-                (self.notify)(Event::Error(format!("Could not open speakers: {e:#}")));
+                self.preview_error(Some(format!("Could not open speakers: {e:#}")));
                 false
             }
         }
     }
 
-    fn make_preview(&self) -> Result<(StreamRc, StreamListener<()>)> {
+    fn make_preview(&self, conn: &Conn) -> Result<Stream> {
         let stream = StreamRc::new(
-            self.core.clone(),
+            conn.core.clone(),
             "esquie-preview",
             properties! {
                 *pw::keys::MEDIA_TYPE => "Audio",
@@ -495,8 +1255,18 @@ impl State {
             },
         )?;
         let engine = self.engine.clone();
+        let weak_conn = conn.weak.clone();
         let listener = stream
             .add_local_listener_with_user_data(())
+            .state_changed(move |_, _, _old, new| {
+                let Some(conn) = weak_conn.upgrade() else { return };
+                let msg = match new {
+                    StreamState::Error(msg) => format!("Could not play to speakers: {msg}"),
+                    StreamState::Unconnected => "Speaker playback was disconnected.".to_string(),
+                    _ => return,
+                };
+                conn.preview_failed.replace(Some(msg));
+            })
             .process(move |stream, _| {
                 let Some(mut buffer) = stream.dequeue_buffer() else { return };
                 let requested = buffer.requested() as usize;
@@ -523,34 +1293,56 @@ impl State {
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
             &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
         )?;
-        Ok((stream, listener))
+        Ok(Stream { _listener: listener, _stream: stream })
     }
 
     fn stop_preview(&self) {
-        self.preview.replace(None);
+        if let Some(conn) = self.current() {
+            conn.preview.replace(None);
+            conn.preview_failed.replace(None);
+        }
         let mut e = self.engine.borrow_mut();
         let Engine { preview, shared, .. } = &mut *e;
         preview.set_mode(PreviewMode::Idle, shared);
     }
 
+    /// The test section needs a connection and a microphone.
+    fn test_conn(&self) -> Option<Rc<Conn>> {
+        let conn = self.current().filter(|c| c.synced.get() && c.capture.borrow().is_some());
+        if conn.is_none() {
+            self.preview_error(Some("No microphone is available to test.".into()));
+        }
+        conn
+    }
+
     fn record(&self) {
-        self.preview.replace(None);
+        let Some(conn) = self.test_conn() else { return };
+        self.preview_error(None);
+        conn.preview.replace(None);
         self.engine.borrow_mut().start_recording();
     }
 
     fn play(&self) {
-        if self.engine.borrow_mut().start_playing() && !self.ensure_preview_stream() {
+        let Some(conn) = self.current().filter(|c| c.synced.get()) else {
+            self.stop_preview();
+            self.preview_error(Some("Not connected to the audio server.".into()));
+            return;
+        };
+        self.preview_error(None);
+        if self.engine.borrow_mut().start_playing() && !self.ensure_preview_stream(&conn) {
             self.stop_preview();
         }
     }
 
     fn monitor(&self) {
+        let Some(conn) = self.test_conn() else { return };
+        self.preview_error(None);
         {
             let mut e = self.engine.borrow_mut();
             let Engine { preview, shared, .. } = &mut *e;
             preview.set_mode(PreviewMode::Monitoring, shared);
         }
-        if !self.ensure_preview_stream() {
+        if !self.ensure_preview_stream(&conn) {
             self.stop_preview();
         }
     }
@@ -563,8 +1355,14 @@ impl State {
         }
     }
 
-    /// Called periodically: ends recordings at the limit and finished playback.
-    fn tick(&self) {
+    /// Ends recordings at the limit, finished playback and failed previews.
+    fn check_preview(&self, conn: &Conn) {
+        let failed = conn.preview_failed.take();
+        if let Some(msg) = failed {
+            self.stop_preview();
+            self.preview_error(Some(msg));
+            return;
+        }
         let (mode, finished) = {
             let e = self.engine.borrow();
             (e.preview.mode, e.preview.finished)
@@ -576,153 +1374,14 @@ impl State {
         }
     }
 
-    fn send_mics(&self) {
-        (self.notify)(Event::Mics {
-            list: self.mics.borrow().iter().map(|(_, m)| m.clone()).collect(),
-            active: self.active.borrow().clone(),
-        });
-    }
-
-    fn start_capture(&self, target: &str) {
-        self.capture.replace(None); // drop the old stream first
-        match self.make_capture(target) {
-            Ok(c) => {
-                self.capture.replace(Some(c));
-                self.active.replace(Some(target.to_string()));
-            }
-            Err(e) => {
-                self.active.replace(None);
-                (self.notify)(Event::Error(format!("Could not open mic: {e:#}")));
-            }
-        }
-        self.send_mics();
-    }
-
-    fn make_capture(&self, target: &str) -> Result<(StreamRc, StreamListener<()>)> {
-        let stream = StreamRc::new(
-            self.core.clone(),
-            "esquie-input",
-            properties! {
-                *pw::keys::MEDIA_TYPE => "Audio",
-                *pw::keys::MEDIA_CATEGORY => "Capture",
-                *pw::keys::MEDIA_ROLE => "Communication",
-                *pw::keys::NODE_NAME => "esquie-input",
-                *pw::keys::NODE_DESCRIPTION => "Esquie input",
-                *pw::keys::TARGET_OBJECT => target,
-                "node.dont-reconnect" => "true",
-                "node.group" => "esquie",
-                "node.latency" => "480/48000",
-            },
-        )?;
-        let engine = self.engine.clone();
-        let listener = stream
-            .add_local_listener_with_user_data(())
-            .process(move |stream, _| {
-                let Some(mut buffer) = stream.dequeue_buffer() else { return };
-                let datas = buffer.datas_mut();
-                let Some(data) = datas.first_mut() else { return };
-                let size = data.chunk().size() as usize;
-                let offset = data.chunk().offset() as usize;
-                if let Some(bytes) = data.data() {
-                    let end = (offset + size).min(bytes.len());
-                    let samples: &[f32] = bytemuck_f32(&bytes[offset.min(end)..end]);
-                    engine.borrow_mut().push_input(samples);
-                }
-            })
-            .register()?;
-        let params = mono_f32_params();
-        let pod = spa::pod::Pod::from_bytes(&params).unwrap();
-        stream.connect(
-            spa::utils::Direction::Input,
-            None,
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-            &mut [pod],
-        )?;
-        Ok((stream, listener))
-    }
-
-    fn on_mic_added(&self, id: u32, mic: Mic) {
-        let name = mic.name.clone();
-        self.mics.borrow_mut().push((id, mic));
-        self.sync_default();
-        let active = self.active.borrow().clone();
-        let use_it = match (&active, self.wanted()) {
-            (None, _) => true,                                // anything beats nothing
-            (Some(a), Some(w)) => *a != w && w == name,       // the mic we really want showed up
-            _ => false,
-        };
-        if use_it {
-            self.start_capture(&name);
-        } else {
-            self.send_mics();
+    fn select_mic(&self, name: String) {
+        self.preferred.replace(Some(name).filter(|n| n != VIRTUAL_NODE_NAME));
+        self.default_synced.set(false);
+        if let Some(conn) = self.current().filter(|c| c.synced.get()) {
+            self.sync_default(&conn);
+            self.reselect(&conn, false);
         }
     }
-
-    fn wanted(&self) -> Option<String> {
-        self.preferred.borrow().clone().or_else(|| self.system_default.borrow().clone())
-    }
-
-    /// Make the picked mic the system default (see `default_synced`).
-    fn sync_default(&self) {
-        if self.default_synced.get() || !self.default_known.get() {
-            return;
-        }
-        let Some(wanted) = self.preferred.borrow().clone() else { return };
-        if !self.mics.borrow().iter().any(|(_, m)| m.name == wanted) {
-            return; // not plugged in; try again when it shows up
-        }
-        let metadata = self.metadata.borrow();
-        let Some((metadata, _)) = metadata.as_ref() else { return };
-        self.default_synced.set(true);
-        if self.default_is_virtual.get() || self.system_default.borrow().as_deref() == Some(&wanted) {
-            return;
-        }
-        let value = format!("{{\"name\":\"{wanted}\"}}");
-        metadata.set_property(0, "default.configured.audio.source", Some("Spa:String:JSON"), Some(&value));
-    }
-
-    fn on_default_changed(&self, name: Option<String>) {
-        self.default_known.set(true);
-        self.default_is_virtual.set(name.as_deref() == Some(VIRTUAL_NODE_NAME));
-        let name = name.filter(|n| n != VIRTUAL_NODE_NAME);
-        self.system_default.replace(name.clone());
-        self.sync_default();
-        let Some(name) = name else { return };
-        if self.preferred.borrow().is_some() || self.active.borrow().as_deref() == Some(&name) {
-            return;
-        }
-        if self.mics.borrow().iter().any(|(_, m)| m.name == name) {
-            self.start_capture(&name);
-        }
-    }
-
-    fn on_global_removed(&self, id: u32) {
-        let removed = {
-            let mut mics = self.mics.borrow_mut();
-            let Some(i) = mics.iter().position(|(mid, _)| *mid == id) else { return };
-            mics.remove(i).1
-        };
-        if self.active.borrow().as_deref() == Some(removed.name.as_str()) {
-            let next = self.mics.borrow().first().map(|(_, m)| m.name.clone());
-            match next {
-                Some(n) => self.start_capture(&n),
-                None => {
-                    self.capture.replace(None);
-                    self.active.replace(None);
-                    self.send_mics();
-                }
-            }
-        } else {
-            self.send_mics();
-        }
-    }
-}
-
-/// Pull "name" out of metadata JSON like {"name":"alsa_input.foo"}.
-fn json_name(json: &str) -> Option<String> {
-    let rest = &json[json.find("\"name\"")? + 6..];
-    let rest = &rest[rest.find('"')? + 1..];
-    Some(rest[..rest.find('"')?].to_string())
 }
 
 /// Reinterpret little-endian f32 bytes (PipeWire buffers are suitably aligned).
@@ -735,7 +1394,9 @@ fn bytemuck_f32_mut(bytes: &mut [u8]) -> &mut [f32] {
     if pre.is_empty() { mid } else { &mut [] }
 }
 
-/// Runs the PipeWire loop until `Command::Quit`. Blocks the calling thread.
+/// Runs the PipeWire loop until `Command::Quit`, reconnecting to the server
+/// whenever it goes away. Blocks the calling thread. Returns an error only for
+/// fatal initialization failures.
 pub fn run(
     shared: Arc<Shared>,
     preferred_mic: Option<String>,
@@ -743,172 +1404,53 @@ pub fn run(
     notify: impl Fn(Event) + 'static,
 ) -> Result<()> {
     pw::init();
-    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
-    let context = pw::context::ContextRc::new(&mainloop, None)?;
-    let core = context.connect_rc(None).context("connecting to PipeWire")?;
-
+    let mainloop = pw::main_loop::MainLoopRc::new(None).context("creating the PipeWire main loop")?;
+    let context = pw::context::ContextRc::new(&mainloop, None).context("creating the PipeWire context")?;
     let engine = Rc::new(RefCell::new(Engine::new(shared)?));
 
-    // The virtual mic other apps will see.
-    let source = StreamRc::new(
-        core.clone(),
-        "esquie",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CLASS => "Audio/Source",
-            *pw::keys::NODE_NAME => VIRTUAL_NODE_NAME,
-            *pw::keys::NODE_DESCRIPTION => "Esquie (noise removed)",
-            "node.group" => "esquie",
-            "node.latency" => "480/48000",
-        },
-    )?;
-    let out_engine = engine.clone();
-    let _source_listener = source
-        .add_local_listener_with_user_data(())
-        .process(move |stream, _| {
-            let Some(mut buffer) = stream.dequeue_buffer() else { return };
-            let requested = buffer.requested() as usize;
-            let datas = buffer.datas_mut();
-            let Some(data) = datas.first_mut() else { return };
-            let mut n = 0;
-            if let Some(bytes) = data.data() {
-                let out = bytemuck_f32_mut(bytes);
-                n = if requested > 0 { requested.min(out.len()) } else { out.len() };
-                out_engine.borrow_mut().pull_output(&mut out[..n]);
-            }
-            let chunk = data.chunk_mut();
-            *chunk.offset_mut() = 0;
-            *chunk.stride_mut() = 4;
-            *chunk.size_mut() = (n * 4) as u32;
-        })
-        .register()?;
-    let params = mono_f32_params();
-    source.connect(
-        spa::utils::Direction::Output,
-        None,
-        StreamFlags::MAP_BUFFERS,
-        &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
-    )?;
-
-    let state = Rc::new(State {
-        core: core.clone(),
+    let app = Rc::new(App {
+        context,
         engine,
-        capture: RefCell::new(None),
-        mics: RefCell::new(Vec::new()),
-        active: RefCell::new(None),
-        preferred: RefCell::new(preferred_mic),
-        system_default: RefCell::new(None),
-        default_known: Cell::new(false),
-        default_is_virtual: Cell::new(false),
-        default_synced: Cell::new(false),
-        metadata: RefCell::new(None),
-        preview: RefCell::new(None),
-        virtual_id: Cell::new(None),
-        apps: RefCell::new(HashMap::new()),
-        links: RefCell::new(HashMap::new()),
-        users: RefCell::new(Vec::new()),
         notify: Box::new(notify),
+        conn: RefCell::new(None),
+        preferred: RefCell::new(preferred_mic.filter(|n| n != VIRTUAL_NODE_NAME)),
+        default_synced: Cell::new(false),
+        lost: RefCell::new(None),
+        server_error: RefCell::new(None),
+        reconnect: RefCell::new(Backoff::default()),
+        capture_retry: RefCell::new(Backoff::default()),
+        status: RefCell::new(None),
+        users: RefCell::new(Vec::new()),
     });
 
-    // Watch for microphones appearing / disappearing.
-    let registry = core.get_registry_rc()?;
-    let registry_weak = registry.downgrade();
-    let st = state.clone();
-    let st2 = state.clone();
-    let _registry_listener = registry
-        .add_listener_local()
-        .global(move |obj| {
-            let Some(props) = obj.props else { return };
-            if obj.type_ == pw::types::ObjectType::Metadata
-                && props.get("metadata.name") == Some("default")
-            {
-                let Some(registry) = registry_weak.upgrade() else { return };
-                let Ok(metadata) = registry.bind::<pw::metadata::Metadata, _>(obj) else { return };
-                let st3 = st.clone();
-                let listener = metadata
-                    .add_listener_local()
-                    .property(move |_subject, key, _type, value| {
-                        if key == Some("default.audio.source") {
-                            st3.on_default_changed(value.and_then(json_name));
-                        }
-                        0
-                    })
-                    .register();
-                st.metadata.replace(Some((metadata, listener)));
-                return;
-            }
-            if obj.type_ == pw::types::ObjectType::Link {
-                let node = |k| props.get(k).and_then(|v| v.parse::<u32>().ok());
-                if let (Some(out), Some(input)) = (node("link.output.node"), node("link.input.node")) {
-                    if Some(out) == st.virtual_id.get() {
-                        st.links.borrow_mut().insert(obj.id, input);
-                        st.send_users();
-                    }
-                }
-                return;
-            }
-            if obj.type_ != pw::types::ObjectType::Node {
-                return;
-            }
-            if props.get("media.class") == Some("Stream/Input/Audio") {
-                let app = props
-                    .get("application.name")
-                    .or(props.get("node.description"))
-                    .or(props.get("node.name"))
-                    .unwrap_or("An app");
-                st.apps.borrow_mut().insert(obj.id, app.to_string());
-                st.send_users();
-                return;
-            }
-            if props.get("media.class") != Some("Audio/Source") {
-                return;
-            }
-            let Some(name) = props.get("node.name") else { return };
-            if name == VIRTUAL_NODE_NAME {
-                st.virtual_id.set(Some(obj.id));
-                return;
-            }
-            let description = props
-                .get("node.description")
-                .or(props.get("node.nick"))
-                .unwrap_or(name)
-                .to_string();
-            st.on_mic_added(obj.id, Mic { name: name.to_string(), description });
-        })
-        .global_remove(move |id| {
-            let link = st2.links.borrow_mut().remove(&id).is_some();
-            let app = st2.apps.borrow_mut().remove(&id).is_some();
-            if link || app {
-                st2.send_users();
-            } else {
-                st2.on_global_removed(id);
-            }
-        })
-        .register();
-
-    let ml = mainloop.clone();
-    let st = state.clone();
+    // Commands work whether or not we're connected; Quit leaves the loop
+    // immediately, which also cancels any pending retry.
+    let ml = mainloop.downgrade();
+    let st = app.clone();
     let _commands = commands.attach(mainloop.loop_(), move |cmd| match cmd {
-        Command::SelectMic(name) => {
-            st.preferred.replace(Some(name.clone()));
-            st.default_synced.set(false);
-            st.sync_default();
-            st.start_capture(&name);
-        }
+        Command::SelectMic(name) => st.select_mic(name),
         Command::Record => st.record(),
         Command::Play => st.play(),
         Command::Monitor => st.monitor(),
         Command::Stop => st.stop(),
-        Command::Quit => ml.quit(),
+        Command::Quit => {
+            if let Some(ml) = ml.upgrade() {
+                ml.quit();
+            }
+        }
     });
 
-    let st = state.clone();
+    let st = app.clone();
     let ticker = mainloop.loop_().add_timer(move |_| st.tick());
-    ticker.update_timer(Some(Duration::from_millis(50)), Some(Duration::from_millis(50)));
+    ticker.update_timer(Some(TICK), Some(TICK));
 
+    app.update_status(Instant::now());
+    app.connect();
     mainloop.run();
-    state.preview.replace(None);
-    state.capture.replace(None);
+
+    if let Some(conn) = app.conn.take() {
+        conn.teardown();
+    }
     Ok(())
 }
 
@@ -949,9 +1491,119 @@ mod tests {
     }
 
     #[test]
-    fn json_name_parses() {
-        assert_eq!(json_name(r#"{"name":"alsa_input.x"}"#).as_deref(), Some("alsa_input.x"));
-        assert_eq!(json_name("{}"), None);
+    fn default_metadata_round_trips() {
+        assert_eq!(parse_default_name(r#"{"name":"alsa_input.x"}"#).as_deref(), Some("alsa_input.x"));
+        assert_eq!(parse_default_name(r#"{ "name" : "a\"b\\c" }"#).as_deref(), Some(r#"a"b\c"#));
+        assert_eq!(parse_default_name("{}"), None);
+        assert_eq!(parse_default_name(r#"{"name":""}"#), None);
+        assert_eq!(parse_default_name("not json"), None);
+        for name in ["alsa_input.usb-Foo_Bar-00.analog-stereo", r#"we"ird\name"#] {
+            assert_eq!(parse_default_name(&default_json(name)).as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn mic_choice_order() {
+        let mics = ["c", "b", "a", VIRTUAL_NODE_NAME];
+        // Saved choice wins, then the system default, then the current fallback.
+        assert_eq!(choose_mic(&mics, Some("c"), Some("b"), Some("a")).as_deref(), Some("c"));
+        assert_eq!(choose_mic(&mics, Some("gone"), Some("b"), Some("a")).as_deref(), Some("b"));
+        assert_eq!(choose_mic(&mics, Some("gone"), Some("gone2"), Some("c")).as_deref(), Some("c"));
+        // Otherwise the first by node name.
+        assert_eq!(choose_mic(&mics, None, None, None).as_deref(), Some("a"));
+        assert_eq!(choose_mic(&mics, Some("gone"), None, Some("gone")).as_deref(), Some("a"));
+        // Esquie itself is never chosen.
+        assert_eq!(choose_mic(&mics, Some(VIRTUAL_NODE_NAME), Some(VIRTUAL_NODE_NAME), None).as_deref(), Some("a"));
+        assert_eq!(choose_mic(&[VIRTUAL_NODE_NAME], None, None, None), None);
+        assert_eq!(choose_mic(&[], Some("a"), None, None), None);
+    }
+
+    #[test]
+    fn retry_backoff() {
+        let delays: Vec<u64> = (0..7).map(|i| retry_delay(i).as_millis() as u64).collect();
+        assert_eq!(delays, [250, 500, 1_000, 2_000, 5_000, 5_000, 5_000]);
+
+        let t0 = Instant::now();
+        let mut b = Backoff::default();
+        b.schedule(t0);
+        b.schedule(t0); // already pending: no extra attempt
+        assert_eq!(b.attempt, 1);
+        assert!(!b.take_due(t0));
+        assert!(b.take_due(t0 + Duration::from_millis(250)));
+        assert!(!b.take_due(t0 + Duration::from_secs(60)), "fires once");
+        b.schedule(t0);
+        assert_eq!(b.due, Some(t0 + Duration::from_millis(500)));
+        b.reset();
+        b.schedule(t0);
+        assert_eq!(b.due, Some(t0 + Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn clear_audio_drops_stale_samples() {
+        let shared = Arc::new(Shared::new(true, 100.0, true, true));
+        let mut engine = Engine::new(shared.clone()).unwrap();
+        let noise: Vec<f32> = (0..SAMPLE_RATE / 10).map(|i| ((i % 97) as f32 / 97.0 - 0.5) * 0.2).collect();
+        engine.start_recording();
+        engine.push_input(&noise);
+        engine.preview.mode = PreviewMode::Monitoring;
+        engine.push_input(&noise);
+        assert!(!engine.queue.is_empty() && !engine.preview.queue.is_empty());
+
+        engine.clear_audio();
+        assert!(engine.queue.is_empty() && engine.input.is_empty() && engine.preview.queue.is_empty());
+        assert_eq!(engine.preview.mode, PreviewMode::Idle);
+        assert_eq!(shared.preview().0, PreviewMode::Idle);
+        assert_eq!(shared.take_levels(), (0.0, 0.0));
+
+        // Nothing queued before the reset is played afterwards.
+        let mut out = vec![1.0; 480];
+        engine.pull_output(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0));
+    }
+}
+
+/// Drives the production engine against whatever PipeWire server the
+/// environment points at, printing every event, then quits and reports how
+/// long Quit took. Used for manual recovery checks against an isolated
+/// server (never the desktop's):
+/// `ESQUIE_LIVE_SECS=30 cargo test --release --locked live_engine -- --ignored --nocapture`
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_engine() {
+        let secs: u64 = std::env::var("ESQUIE_LIVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        let preferred = std::env::var("ESQUIE_LIVE_MIC").ok();
+        let (tx, rx) = pw::channel::channel::<Command>();
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel::<String>();
+        let start = Instant::now();
+        let shared = Arc::new(Shared::new(true, 100.0, true, true));
+        let thread = std::thread::spawn(move || {
+            run(shared, preferred, rx, move |e| {
+                let line = match e {
+                    Event::Mics { list, active } => {
+                        let names: Vec<_> = list.iter().map(|m| m.name.as_str()).collect();
+                        format!("mics {names:?} active {active:?}")
+                    }
+                    Event::Users(u) => format!("users {u:?}"),
+                    Event::Status(s) => format!("status {s:?}"),
+                    Event::PreviewError(m) => format!("preview-error {m:?}"),
+                };
+                let _ = ev_tx.send(line);
+            })
+        });
+        let deadline = start + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if let Ok(line) = ev_rx.recv_timeout(Duration::from_millis(100)) {
+                println!("[{:7.2}] {line}", start.elapsed().as_secs_f32());
+            }
+        }
+        let quit = Instant::now();
+        let _ = tx.send(Command::Quit);
+        thread.join().unwrap().unwrap();
+        println!("quit took {} ms", quit.elapsed().as_millis());
     }
 }
 

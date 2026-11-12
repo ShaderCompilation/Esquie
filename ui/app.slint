@@ -1,6 +1,7 @@
 import { ComboBox, Slider, Switch, Palette } from "std-widgets.slint";
 
 export enum TestMode { idle, recording, playing, monitoring }
+export enum AudioStatus { connecting, disconnected, no-microphone, no-route, ready, failed }
 
 // ── Design tokens (follow the system light/dark preference) ─────────────────
 global Theme {
@@ -299,8 +300,9 @@ export component AppWindow inherits Window {
     in-out property <float> strength: 100;
     in property <float> in-level;
     in property <float> out-level;
-    in property <bool> ready;
-    in property <string> error;
+    in property <AudioStatus> audio-status;
+    in property <string> status-message; // shown in a banner when not empty
+    in property <string> test-error;
     in property <string> users; // apps using the virtual mic, comma separated
     in property <TestMode> test-mode;
     in property <float> clip-length; // seconds
@@ -361,26 +363,31 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 alignment: center;
                 Pill {
-                    text: root.error != "" ? "Error"
-                        : !root.ready ? "Starting…"
-                        : !root.has-mic ? "No microphone"
+                    text: root.audio-status == AudioStatus.failed ? "Error"
+                        : root.audio-status == AudioStatus.connecting ? "Starting…"
+                        : root.audio-status == AudioStatus.disconnected ? "Reconnecting…"
+                        : root.audio-status == AudioStatus.no-microphone ? "No microphone"
+                        : root.audio-status == AudioStatus.no-route ? "Mic unavailable"
                         : !root.enabled ? "Bypassed"
                         : "Active";
-                    tint: root.error != "" || (root.ready && !root.has-mic) ? Theme.bad
-                        : !root.ready || !root.enabled ? Theme.warn
+                    tint: root.audio-status == AudioStatus.failed
+                            || root.audio-status == AudioStatus.no-microphone
+                            || root.audio-status == AudioStatus.no-route ? Theme.bad
+                        : root.audio-status != AudioStatus.ready || !root.enabled ? Theme.warn
                         : Theme.good;
                 }
             }
         }
 
-        if root.error != "": Rectangle {
+        if root.status-message != "": Rectangle {
+            property <color> tint: root.audio-status == AudioStatus.disconnected ? Theme.warn : Theme.bad;
             border-radius: 12px;
-            background: Theme.bad.transparentize(0.88);
+            background: tint.transparentize(0.88);
             border-width: 1px;
-            border-color: Theme.bad.transparentize(0.6);
+            border-color: tint.transparentize(0.6);
             HorizontalLayout {
                 padding: 12px;
-                Text { text: root.error; color: Theme.bad; wrap: word-wrap; font-size: 13px; }
+                Text { text: root.status-message; color: tint; wrap: word-wrap; font-size: 13px; }
             }
         }
 
@@ -573,6 +580,13 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+
+            if root.test-error != "": Text {
+                text: root.test-error;
+                color: Theme.bad;
+                font-size: 12px;
+                wrap: word-wrap;
             }
 
             if root.test-mode == TestMode.monitoring: Rectangle {
