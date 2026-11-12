@@ -634,7 +634,13 @@ mod tests {
         let cache = s.locations.data.join("icons/hicolor/icon-theme.cache");
         fs::create_dir_all(cache.parent().unwrap()).unwrap();
         fs::write(&cache, "stale cache without esquie").unwrap();
-        install(&s.locations, &s.inventory(), &s.locations.default_bin, false).unwrap();
+        install(
+            &s.locations,
+            &s.inventory(),
+            &s.locations.default_bin,
+            false,
+        )
+        .unwrap();
         // Refreshed caches list esquie; if the tool is unavailable the stale
         // cache is removed so lookups fall back to scanning the directory.
         let fresh = fs::read_to_string(&cache);
