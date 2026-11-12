@@ -15,6 +15,12 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 slint::include_modules!();
 
 fn main() -> anyhow::Result<()> {
+    // Handle this before settings, desktop services, or the audio engine exist.
+    if std::env::args_os().skip(1).any(|arg| arg == "--version") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let settings = Arc::new(Mutex::new(Settings::load()));
     let initial = settings.lock().unwrap().clone();
     let shared = Arc::new(Shared::new(

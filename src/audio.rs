@@ -956,7 +956,7 @@ mod tests {
 }
 
 /// Tuning aids for the values in `dsp::Tuning` (run with `ESQUIE_*` overrides):
-/// `cargo test --release tune -- --ignored --nocapture`
+/// `cargo test --release --locked tune -- --ignored --nocapture`
 /// Uses the speech/noise samples shipped in the DeepFilterNet git checkout.
 #[cfg(test)]
 mod tune {

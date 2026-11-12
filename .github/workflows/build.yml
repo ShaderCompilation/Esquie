@@ -1,0 +1,59 @@
+name: Linux builds and tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }} / x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04
+            id: ubuntu-24.04
+            image: ubuntu:24.04
+          - name: Ubuntu 26.04
+            id: ubuntu-26.04
+            image: ubuntu:26.04
+          - name: Debian 13
+            id: debian-13
+            image: debian:13
+          - name: Fedora 44
+            id: fedora-44
+            image: fedora:44
+          - name: Fedora 45
+            id: fedora-45
+            image: fedora:45
+          - name: Arch Linux (current)
+            id: arch
+            image: archlinux:base
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build and test in a fresh distro container
+        shell: bash
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          mkdir -p target/validation
+          docker pull --platform linux/amd64 "$DISTRO_IMAGE"
+          docker image inspect --format '{{index .RepoDigests 0}}' "$DISTRO_IMAGE" > target/validation/image.txt
+          image_digest=$(cat target/validation/image.txt)
+          docker run --rm --platform linux/amd64 \
+            --env CARGO_BUILD_JOBS=2 \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$image_digest" bash ci/container-build.sh 2>&1 | tee target/validation/check.log
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: validation-${{ matrix.id }}-x86_64
+          path: target/validation/
+          if-no-files-found: error

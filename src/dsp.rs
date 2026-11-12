@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 /// Values tuned by the developer, not exposed in the UI. Each can be
 /// overridden with an environment variable for listening tests, e.g.
-/// `ESQUIE_GATE_OPEN_DB=-2 cargo run --release`.
+/// `ESQUIE_GATE_OPEN_DB=-2 cargo run --release --locked`.
 #[derive(Debug, Clone, Copy)]
 pub struct Tuning {
     /// High-pass cutoff before the model (0 disables it).
