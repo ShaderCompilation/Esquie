@@ -8,6 +8,7 @@ mod installation;
 mod installation_ui;
 mod logging;
 mod settings;
+mod single_instance;
 mod tray;
 
 use std::sync::atomic::Ordering;
@@ -69,6 +70,22 @@ fn main() -> anyhow::Result<()> {
         }
     );
 
+    // One Esquie at a time: a second launch asks this one to show its
+    // window and exits. Must run before settings and the audio engine,
+    // so only the primary ever creates the virtual mic.
+    let instance = match single_instance::acquire() {
+        single_instance::Acquired::Primary(instance) => Some(instance),
+        single_instance::Acquired::AlreadyRunning => {
+            info!("already running; asked the other instance to show its window");
+            eprintln!("esquie is already running; showing the existing window.");
+            return Ok(());
+        }
+        single_instance::Acquired::Unavailable => {
+            warn!("no usable location for the instance lock; multiple instances remain possible");
+            None
+        }
+    };
+
     let settings = Arc::new(Mutex::new(Settings::load()));
     let initial = settings.lock().unwrap().clone();
     let shared = Arc::new(Shared::new(
@@ -91,6 +108,16 @@ fn main() -> anyhow::Result<()> {
     ui.set_autostart(autostart::is_enabled());
     let handoff = installation_ui::setup(&ui, settings.clone());
     diagnostics::setup(&ui, crashed_last_run);
+
+    // Later launches reach the running instance through this socket.
+    let reveal = instance.map(|instance| {
+        let ui_weak = ui.as_weak();
+        instance.serve(move || {
+            let _ = ui_weak.upgrade_in_event_loop(|ui| {
+                let _ = ui.show();
+            });
+        })
+    });
 
     // Tray icon. Its callbacks run on the tray thread, so hop to the UI thread.
     // `has-tray` tracks whether the icon is visible right now.
@@ -307,6 +334,10 @@ fn main() -> anyhow::Result<()> {
     // The old microphone is gone before another process creates its replacement.
     // Installation alone never gets here with a handoff target.
     if let Some(target) = handoff.lock().unwrap().take() {
+        // Release the instance lock first so the successor can claim it.
+        if let Some(reveal) = reveal {
+            reveal.unbind();
+        }
         std::process::Command::new(target)
             .env_remove("APPIMAGE")
             .env_remove("APPDIR")
