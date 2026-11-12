@@ -187,6 +187,54 @@ component Chip inherits Rectangle {
     }
 }
 
+// Press-and-hold button: reports true while held, false on release (also when
+// the pointer leaves or the grab is cancelled, so the DSP never stays
+// bypassed by accident).
+component HoldButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <color> tint: Theme.warn;
+    callback hold-changed(bool);
+    property <bool> held;
+    min-height: 40px;
+    min-width: 40px;
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: ta.pressed ? tint.transparentize(0.78) : ta.has-hover ? Theme.surface-2 : Theme.surface;
+    animate background { duration: 120ms; }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        alignment: center;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Icon { icon: root.icon; color: root.tint; width: 16px; height: 16px; }
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: Theme.text;
+            font-weight: 600;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.held = true;
+                root.hold-changed(true);
+            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.held {
+                root.held = false;
+                root.hold-changed(false);
+            }
+        }
+    }
+}
+
 component Segmented inherits Rectangle {
     in property <[string]> items;
     in-out property <int> index;
@@ -362,6 +410,7 @@ export component AppWindow inherits Window {
     callback gate-changed(bool);
     callback play-cleaned-changed(bool);
     callback autostart-changed(bool);
+    callback bypass-hold(bool);
 
     private property <bool> has-mic: root.mics.length > 0;
     private property <bool> no-mic: root.audio-status == AudioStatus.no-microphone;
@@ -371,6 +420,8 @@ export component AppWindow inherits Window {
     private property <bool> test-collapsed:
         root.test-mode == TestMode.idle && root.clip-length == 0;
 
+    private property <bool> bypass-held: false;
+
     pure function seconds(s: float) -> string {
         "0:" + (s < 9.5 ? "0" : "") + Math.round(s)
     }
@@ -378,6 +429,16 @@ export component AppWindow inherits Window {
     function set-strength(v: float) {
         root.strength = v;
         root.strength-changed(v);
+    }
+
+    // Stop the current test and release the hold-to-hear-original bypass if it
+    // is still active (the button may vanish while pressed).
+    function end-test() {
+        if root.bypass-held {
+            root.bypass-held = false;
+            root.bypass-hold(false);
+        }
+        root.stop-test();
     }
 
     ScrollView {
@@ -603,6 +664,10 @@ export component AppWindow inherits Window {
                             Meter { level: root.out-level; color: root.enabled ? Theme.good : Theme.text-dim; }
                         }
                     }
+                    if !root.no-mic && root.bypass-held: HorizontalLayout {
+                        alignment: center;
+                        Pill { text: "Original"; tint: Theme.warn; }
+                    }
                 }
 
                 // Settings
@@ -619,6 +684,7 @@ export component AppWindow inherits Window {
                     }
                     VerticalLayout {
                         spacing: 8px;
+                        opacity: root.enabled ? 1 : 0.55;
                         HorizontalLayout {
                             Label { text: "STRENGTH"; horizontal-stretch: 1; }
                             Text {
@@ -626,6 +692,9 @@ export component AppWindow inherits Window {
                                 font-size: 12px;
                                 font-weight: 700;
                                 color: root.enabled ? Theme.accent : Theme.text-dim;
+                                horizontal-alignment: right;
+                                // Fixed width so the value doesn't jitter while dragging.
+                                min-width: 64px;
                             }
                         }
                         Slider {
@@ -639,19 +708,16 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             Chip {
                                 text: "Natural";
-                                enabled: root.enabled;
                                 selected: Math.abs(root.strength - 30) < 0.5;
                                 clicked => { root.set-strength(30); }
                             }
                             Chip {
                                 text: "Balanced";
-                                enabled: root.enabled;
                                 selected: Math.abs(root.strength - 65) < 0.5;
                                 clicked => { root.set-strength(65); }
                             }
                             Chip {
                                 text: "Maximum";
-                                enabled: root.enabled;
                                 selected: root.strength >= 99.5;
                                 clicked => { root.set-strength(100); }
                             }
@@ -719,7 +785,7 @@ export component AppWindow inherits Window {
                                 icon-filled: true;
                                 primary: true;
                                 tint: Theme.bad;
-                                clicked => { root.stop-test(); }
+                                clicked => { root.end-test(); }
                             }
                         }
                         Progress { value: root.clip-length / root.clip-max; tint: Theme.bad; }
@@ -753,10 +819,19 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                             clicked => {
                                 if root.test-mode == TestMode.monitoring {
-                                    root.stop-test();
+                                    root.end-test();
                                 } else {
                                     root.monitor();
                                 }
+                            }
+                        }
+                        if root.test-mode == TestMode.monitoring: HoldButton {
+                            text: "Hold to hear original";
+                            icon: "headphones";
+                            horizontal-stretch: 1;
+                            hold-changed(held) => {
+                                root.bypass-held = held;
+                                root.bypass-hold(held);
                             }
                         }
                     }
@@ -809,7 +884,7 @@ export component AppWindow inherits Window {
                                 primary: true;
                                 clicked => {
                                     if root.test-mode == TestMode.playing {
-                                        root.stop-test();
+                                        root.end-test();
                                     } else {
                                         root.play();
                                     }

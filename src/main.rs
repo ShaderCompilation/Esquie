@@ -272,6 +272,17 @@ fn main() -> anyhow::Result<()> {
         let shared = shared.clone();
         ui.on_play_cleaned_changed(move |on| shared.play_cleaned.store(on, Ordering::Relaxed));
     }
+    {
+        // Hold-to-hear-original: bypass the DSP while held, then restore the
+        // power state the UI still shows. Transient only — nothing is
+        // persisted and the tray/power UI is untouched.
+        let shared = shared.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_bypass_hold(move |held| {
+            let restore = ui_weak.upgrade().map(|ui| ui.get_enabled()).unwrap_or(true);
+            shared.enabled.store(!held && restore, Ordering::Relaxed);
+        });
+    }
     let send = |cmd: fn() -> Command| {
         let tx = cmd_tx.clone();
         move || {
