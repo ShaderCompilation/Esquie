@@ -931,11 +931,11 @@ impl App {
         }
         if obj.type_ == pw::types::ObjectType::Link {
             let node = |k| props.get(k).and_then(|v| v.parse::<u32>().ok());
-            if let (Some(out), Some(input)) = (node("link.output.node"), node("link.input.node")) {
-                if Some(out) == conn.virtual_id.get() {
-                    conn.links.borrow_mut().insert(obj.id, input);
-                    self.send_users(conn);
-                }
+            if let (Some(out), Some(input)) = (node("link.output.node"), node("link.input.node"))
+                && Some(out) == conn.virtual_id.get()
+            {
+                conn.links.borrow_mut().insert(obj.id, input);
+                self.send_users(conn);
             }
             return;
         }
