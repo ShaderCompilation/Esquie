@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use audio::{Command, Event, PreviewMode, Shared, Status};
-use settings::{strength_to_db, Settings};
+use settings::{Settings, strength_to_db};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -28,7 +28,10 @@ fn main() -> anyhow::Result<()> {
     }
     // Used by install.sh, so the launcher shares the autostart entry's quoting.
     if has_arg("--print-launcher-entry") {
-        print!("{}", desktop_entry::launcher(&desktop_entry::executable()?)?);
+        print!(
+            "{}",
+            desktop_entry::launcher(&desktop_entry::executable()?)?
+        );
         return Ok(());
     }
     if has_arg("--refresh-autostart") {
@@ -109,17 +112,21 @@ fn main() -> anyhow::Result<()> {
         let shared = shared.clone();
         let ui_weak = ui.as_weak();
         let mic = initial.mic.clone();
-        std::thread::Builder::new().name("esquie-audio".into()).spawn(move || {
-            let notify_weak = ui_weak.clone();
-            let notify = move |event: Event| {
-                let _ = notify_weak.upgrade_in_event_loop(move |ui| apply_event(&ui, event));
-            };
-            if let Err(e) = audio::run(shared, mic, cmd_rx, notify) {
-                let msg = format!("Audio engine failed: {e:#}");
-                eprintln!("{msg}");
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| apply_event(&ui, Event::Status(Status::Failed(msg))));
-            }
-        })?
+        std::thread::Builder::new()
+            .name("esquie-audio".into())
+            .spawn(move || {
+                let notify_weak = ui_weak.clone();
+                let notify = move |event: Event| {
+                    let _ = notify_weak.upgrade_in_event_loop(move |ui| apply_event(&ui, event));
+                };
+                if let Err(e) = audio::run(shared, mic, cmd_rx, notify) {
+                    let msg = format!("Audio engine failed: {e:#}");
+                    eprintln!("{msg}");
+                    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                        apply_event(&ui, Event::Status(Status::Failed(msg)))
+                    });
+                }
+            })?
     };
 
     {
@@ -128,7 +135,11 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         ui.on_mic_selected(move |i| {
             let Some(ui) = ui_weak.upgrade() else { return };
-            if let Some(name) = ui.get_mic_names().row_data(i as usize).map(|n| n.to_string()) {
+            if let Some(name) = ui
+                .get_mic_names()
+                .row_data(i as usize)
+                .map(|n| n.to_string())
+            {
                 let mut s = settings.lock().unwrap();
                 s.mic = Some(name.clone());
                 s.save();
@@ -217,21 +228,25 @@ fn main() -> anyhow::Result<()> {
     {
         let ui_weak = ui.as_weak();
         let shared = shared.clone();
-        meter_timer.start(slint::TimerMode::Repeated, Duration::from_millis(33), move || {
-            let Some(ui) = ui_weak.upgrade() else { return };
-            let (i, o) = shared.take_levels();
-            ui.set_in_level(to_meter(i).max(ui.get_in_level() * 0.85));
-            ui.set_out_level(to_meter(o).max(ui.get_out_level() * 0.85));
-            let (mode, clip, pos) = shared.preview();
-            ui.set_test_mode(match mode {
-                PreviewMode::Idle => TestMode::Idle,
-                PreviewMode::Recording => TestMode::Recording,
-                PreviewMode::Playing => TestMode::Playing,
-                PreviewMode::Monitoring => TestMode::Monitoring,
-            });
-            ui.set_clip_length(clip);
-            ui.set_clip_pos(pos);
-        });
+        meter_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(33),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let (i, o) = shared.take_levels();
+                ui.set_in_level(to_meter(i).max(ui.get_in_level() * 0.85));
+                ui.set_out_level(to_meter(o).max(ui.get_out_level() * 0.85));
+                let (mode, clip, pos) = shared.preview();
+                ui.set_test_mode(match mode {
+                    PreviewMode::Idle => TestMode::Idle,
+                    PreviewMode::Recording => TestMode::Recording,
+                    PreviewMode::Playing => TestMode::Playing,
+                    PreviewMode::Monitoring => TestMode::Monitoring,
+                });
+                ui.set_clip_length(clip);
+                ui.set_clip_pos(pos);
+            },
+        );
     }
 
     // With a tray, closing the window just hides it; quit from the tray menu.
@@ -279,7 +294,8 @@ fn reveal_without_tray_later(ui: &AppWindow) {
 fn apply_event(ui: &AppWindow, event: Event) {
     match event {
         Event::Mics { list, active } => {
-            let labels: Vec<SharedString> = list.iter().map(|m| m.description.as_str().into()).collect();
+            let labels: Vec<SharedString> =
+                list.iter().map(|m| m.description.as_str().into()).collect();
             let names: Vec<SharedString> = list.iter().map(|m| m.name.as_str().into()).collect();
             let index = active
                 .as_ref()
@@ -295,10 +311,14 @@ fn apply_event(ui: &AppWindow, event: Event) {
                 Status::Connecting => (AudioStatus::Connecting, String::new()),
                 Status::Disconnected(_) => (
                     AudioStatus::Disconnected,
-                    "Waiting for the audio server (PipeWire). Esquie reconnects automatically.".to_string(),
+                    "Waiting for the audio server (PipeWire). Esquie reconnects automatically."
+                        .to_string(),
                 ),
                 Status::NoMicrophone => (AudioStatus::NoMicrophone, String::new()),
-                Status::NoRoute(msg) => (AudioStatus::NoRoute, format!("{msg} Retrying automatically.")),
+                Status::NoRoute(msg) => (
+                    AudioStatus::NoRoute,
+                    format!("{msg} Retrying automatically."),
+                ),
                 Status::Ready => (AudioStatus::Ready, String::new()),
                 Status::Failed(msg) => (AudioStatus::Failed, msg),
             };

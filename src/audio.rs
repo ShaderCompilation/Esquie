@@ -14,8 +14,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -86,7 +86,11 @@ impl Shared {
             _ => PreviewMode::Idle,
         };
         let secs = |n: usize| n as f32 / SAMPLE_RATE as f32;
-        (mode, secs(self.clip_len.load(Ordering::Relaxed)), secs(self.play_pos.load(Ordering::Relaxed)))
+        (
+            mode,
+            secs(self.clip_len.load(Ordering::Relaxed)),
+            secs(self.play_pos.load(Ordering::Relaxed)),
+        )
     }
     pub fn set_atten_db(&self, db: f32) {
         self.atten_db.store(db.to_bits(), Ordering::Relaxed);
@@ -130,7 +134,10 @@ pub enum Command {
 
 /// Events sent from the audio thread to the UI.
 pub enum Event {
-    Mics { list: Vec<Mic>, active: Option<String> },
+    Mics {
+        list: Vec<Mic>,
+        active: Option<String>,
+    },
     /// Apps currently reading the virtual mic.
     Users(Vec<String>),
     /// Overall engine state; drives readiness and the main error banner.
@@ -175,8 +182,13 @@ impl Cleaner {
             .with_atten_lim(atten_db)
             .with_thresholds(t.min_db, t.max_erb_db, t.max_df_db)
             .with_post_filter(t.pf_beta);
-        let df = DfTract::new(DfParams::default(), &params).context("loading DeepFilterNet model")?;
-        anyhow::ensure!(df.sr == SAMPLE_RATE as usize, "model sample rate is {}", df.sr);
+        let df =
+            DfTract::new(DfParams::default(), &params).context("loading DeepFilterNet model")?;
+        anyhow::ensure!(
+            df.sr == SAMPLE_RATE as usize,
+            "model sample rate is {}",
+            df.sr
+        );
         let hop = df.hop_size;
         let mut c = Self {
             hpf: HighPass::new(t.hpf_hz, SAMPLE_RATE as f32),
@@ -197,7 +209,8 @@ impl Cleaner {
             self.atten_db = db;
             self.df.set_atten_lim(db);
         }
-        self.df.post_filter = shared.extra_cleanup.load(Ordering::Relaxed) && Tuning::get().pf_beta > 0.0;
+        self.df.post_filter =
+            shared.extra_cleanup.load(Ordering::Relaxed) && Tuning::get().pf_beta > 0.0;
         let gate_on = shared.gate.load(Ordering::Relaxed);
         if gate_on != self.gate_on {
             self.gate_on = gate_on;
@@ -313,7 +326,11 @@ impl Preview {
                     let frame = &self.clip[self.pos..self.pos + hop];
                     // Always run the model so switching to "cleaned" mid-play is seamless.
                     self.cleaner.process(frame, &mut self.frame);
-                    self.queue.extend(if cleaned { &self.frame[..] } else { frame }.iter().copied());
+                    self.queue.extend(
+                        if cleaned { &self.frame[..] } else { frame }
+                            .iter()
+                            .copied(),
+                    );
                     self.pos += hop;
                 }
                 shared.play_pos.store(self.pos, Ordering::Relaxed);
@@ -366,7 +383,8 @@ impl Engine {
         let p = &mut self.preview;
         if p.mode == PreviewMode::Recording && !p.finished {
             let room = MAX_CLIP - p.clip.len();
-            p.clip.extend_from_slice(&samples[..samples.len().min(room)]);
+            p.clip
+                .extend_from_slice(&samples[..samples.len().min(room)]);
             self.shared.clip_len.store(p.clip.len(), Ordering::Relaxed);
             p.finished = p.clip.len() >= MAX_CLIP;
         }
@@ -536,7 +554,12 @@ fn choose_mic(
         .filter(usable)
         .or(system_default.filter(usable))
         .or(current.filter(usable))
-        .or_else(|| mics.iter().copied().filter(|n| *n != VIRTUAL_NODE_NAME).min())
+        .or_else(|| {
+            mics.iter()
+                .copied()
+                .filter(|n| *n != VIRTUAL_NODE_NAME)
+                .min()
+        })
         .map(str::to_owned)
 }
 
@@ -696,7 +719,10 @@ impl App {
     }
 
     fn try_connect(self: &Rc<Self>) -> Result<Rc<Conn>> {
-        let core = self.context.connect_rc(None).context("connecting to PipeWire")?;
+        let core = self
+            .context
+            .connect_rc(None)
+            .context("connecting to PipeWire")?;
         let conn = Conn::new(core);
         let result = self.setup(&conn);
         if result.is_err() {
@@ -727,7 +753,9 @@ impl App {
                 }
             })
             .done(move |id, seq| {
-                let (Some(app), Some(conn)) = (weak_app.upgrade(), weak_conn.upgrade()) else { return };
+                let (Some(app), Some(conn)) = (weak_app.upgrade(), weak_conn.upgrade()) else {
+                    return;
+                };
                 if id == pw::core::PW_ID_CORE && seq.seq() == conn.sync_seq.get() {
                     app.on_sync_done(&conn);
                 }
@@ -793,7 +821,10 @@ impl App {
         self.server_error.replace(Some(reason));
         self.capture_retry.borrow_mut().reset();
         self.engine.borrow_mut().clear_audio();
-        (self.notify)(Event::Mics { list: Vec::new(), active: None });
+        (self.notify)(Event::Mics {
+            list: Vec::new(),
+            active: None,
+        });
         self.set_users(Vec::new());
     }
 
@@ -853,7 +884,10 @@ impl App {
             CaptureState::Streaming => Status::Ready,
             CaptureState::Failed(msg) => Status::NoRoute(msg),
             CaptureState::Waiting(since) if retrying || now - since >= ROUTE_TIMEOUT => {
-                Status::NoRoute(format!("{} is not sending audio to Esquie.", self.active_label(&conn)))
+                Status::NoRoute(format!(
+                    "{} is not sending audio to Esquie.",
+                    self.active_label(&conn)
+                ))
             }
             CaptureState::Waiting(_) | CaptureState::Idle => Status::Connecting,
         }
@@ -889,7 +923,9 @@ impl App {
         obj: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
     ) {
         let Some(props) = obj.props else { return };
-        if obj.type_ == pw::types::ObjectType::Metadata && props.get("metadata.name") == Some("default") {
+        if obj.type_ == pw::types::ObjectType::Metadata
+            && props.get("metadata.name") == Some("default")
+        {
             self.bind_metadata(conn, registry, obj);
             return;
         }
@@ -919,13 +955,25 @@ impl App {
         if props.get("media.class") != Some("Audio/Source") {
             return;
         }
-        let Some(name) = props.get("node.name") else { return };
+        let Some(name) = props.get("node.name") else {
+            return;
+        };
         if name == VIRTUAL_NODE_NAME {
             conn.virtual_id.set(Some(obj.id));
             return;
         }
-        let description = props.get("node.description").or(props.get("node.nick")).unwrap_or(name).to_string();
-        conn.mics.borrow_mut().push((obj.id, Mic { name: name.to_string(), description }));
+        let description = props
+            .get("node.description")
+            .or(props.get("node.nick"))
+            .unwrap_or(name)
+            .to_string();
+        conn.mics.borrow_mut().push((
+            obj.id,
+            Mic {
+                name: name.to_string(),
+                description,
+            },
+        ));
         if conn.synced.get() {
             self.sync_default(conn);
             self.reselect(conn, false);
@@ -953,9 +1001,13 @@ impl App {
         let listener = metadata
             .add_listener_local()
             .property(move |subject, key, _type, value| {
-                let (Some(app), Some(conn)) = (app.upgrade(), weak_conn.upgrade()) else { return 0 };
+                let (Some(app), Some(conn)) = (app.upgrade(), weak_conn.upgrade()) else {
+                    return 0;
+                };
                 // A `None` key means all properties were cleared.
-                if subject == pw::core::PW_ID_CORE && matches!(key, None | Some("default.audio.source")) {
+                if subject == pw::core::PW_ID_CORE
+                    && matches!(key, None | Some("default.audio.source"))
+                {
                     app.on_default_changed(&conn, value.and_then(parse_default_name));
                 }
                 0
@@ -971,7 +1023,11 @@ impl App {
             self.send_users(conn);
             return;
         }
-        let is_metadata = conn.metadata.borrow().as_ref().is_some_and(|(mid, ..)| *mid == id);
+        let is_metadata = conn
+            .metadata
+            .borrow()
+            .as_ref()
+            .is_some_and(|(mid, ..)| *mid == id);
         if is_metadata {
             // Removed from the server; a replacement is bound when it appears.
             conn.metadata.replace(None);
@@ -996,8 +1052,10 @@ impl App {
 
     fn on_default_changed(self: &Rc<Self>, conn: &Rc<Conn>, name: Option<String>) {
         conn.default_known.set(true);
-        conn.default_is_virtual.set(name.as_deref() == Some(VIRTUAL_NODE_NAME));
-        conn.system_default.replace(name.filter(|n| n != VIRTUAL_NODE_NAME));
+        conn.default_is_virtual
+            .set(name.as_deref() == Some(VIRTUAL_NODE_NAME));
+        conn.system_default
+            .replace(name.filter(|n| n != VIRTUAL_NODE_NAME));
         if conn.synced.get() {
             self.sync_default(conn);
             self.reselect(conn, false);
@@ -1009,24 +1067,38 @@ impl App {
         if self.default_synced.get() || !conn.default_known.get() {
             return;
         }
-        let Some(wanted) = self.preferred.borrow().clone() else { return };
+        let Some(wanted) = self.preferred.borrow().clone() else {
+            return;
+        };
         if !conn.has_mic(&wanted) {
             return; // not plugged in; try again when it shows up
         }
         let metadata = conn.metadata.borrow();
-        let Some((_, _, metadata)) = metadata.as_ref() else { return };
+        let Some((_, _, metadata)) = metadata.as_ref() else {
+            return;
+        };
         self.default_synced.set(true);
-        if conn.default_is_virtual.get() || conn.system_default.borrow().as_deref() == Some(&wanted) {
+        if conn.default_is_virtual.get() || conn.system_default.borrow().as_deref() == Some(&wanted)
+        {
             return;
         }
         let value = default_json(&wanted);
-        metadata.set_property(0, "default.configured.audio.source", Some("Spa:String:JSON"), Some(&value));
+        metadata.set_property(
+            0,
+            "default.configured.audio.source",
+            Some("Spa:String:JSON"),
+            Some(&value),
+        );
     }
 
     fn send_users(&self, conn: &Conn) {
         let users: Vec<String> = {
             let apps = conn.apps.borrow();
-            conn.links.borrow().values().filter_map(|n| apps.get(n).cloned()).collect()
+            conn.links
+                .borrow()
+                .values()
+                .filter_map(|n| apps.get(n).cloned())
+                .collect()
         };
         self.set_users(users);
     }
@@ -1042,8 +1114,15 @@ impl App {
 
     fn send_mics(&self, conn: &Conn) {
         let mut list: Vec<Mic> = conn.mics.borrow().iter().map(|(_, m)| m.clone()).collect();
-        list.sort_by(|a, b| a.description.cmp(&b.description).then_with(|| a.name.cmp(&b.name)));
-        (self.notify)(Event::Mics { list, active: conn.active.borrow().clone() });
+        list.sort_by(|a, b| {
+            a.description
+                .cmp(&b.description)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        (self.notify)(Event::Mics {
+            list,
+            active: conn.active.borrow().clone(),
+        });
     }
 
     // ── Capture ────────────────────────────────────────────────────────────
@@ -1078,7 +1157,8 @@ impl App {
         conn.capture.replace(None); // drop the old stream first
         self.reset_audio(conn);
         conn.active.replace(Some(target.to_string()));
-        conn.capture_state.replace(CaptureState::Waiting(Instant::now()));
+        conn.capture_state
+            .replace(CaptureState::Waiting(Instant::now()));
         match self.make_capture(conn, target) {
             Ok(stream) => {
                 conn.capture.replace(Some(stream));
@@ -1132,14 +1212,22 @@ impl App {
                 }
             })
             .process(move |stream, _| {
-                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
                 let requested = buffer.requested() as usize;
                 let datas = buffer.datas_mut();
-                let Some(data) = datas.first_mut() else { return };
+                let Some(data) = datas.first_mut() else {
+                    return;
+                };
                 let mut n = 0;
                 if let Some(bytes) = data.data() {
                     let out = bytemuck_f32_mut(bytes);
-                    n = if requested > 0 { requested.min(out.len()) } else { out.len() };
+                    n = if requested > 0 {
+                        requested.min(out.len())
+                    } else {
+                        out.len()
+                    };
                     engine.borrow_mut().pull_output(&mut out[..n]);
                 }
                 let chunk = data.chunk_mut();
@@ -1155,7 +1243,10 @@ impl App {
             StreamFlags::MAP_BUFFERS,
             &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
         )?;
-        Ok(Stream { _listener: listener, _stream: stream })
+        Ok(Stream {
+            _listener: listener,
+            _stream: stream,
+        })
     }
 
     fn make_capture(&self, conn: &Conn, target: &str) -> Result<Stream> {
@@ -1180,11 +1271,17 @@ impl App {
         let listener = stream
             .add_local_listener_with_user_data(())
             .state_changed(move |_, _, _old, new| {
-                let Some(conn) = weak_conn.upgrade() else { return };
+                let Some(conn) = weak_conn.upgrade() else {
+                    return;
+                };
                 let next = match new {
                     StreamState::Streaming => CaptureState::Streaming,
-                    StreamState::Error(msg) => CaptureState::Failed(format!("Could not use {label}: {msg}")),
-                    StreamState::Unconnected => CaptureState::Failed(format!("{label} was disconnected.")),
+                    StreamState::Error(msg) => {
+                        CaptureState::Failed(format!("Could not use {label}: {msg}"))
+                    }
+                    StreamState::Unconnected => {
+                        CaptureState::Failed(format!("{label} was disconnected."))
+                    }
                     // Lost its link (e.g. the session manager restarted): wait again.
                     StreamState::Paused | StreamState::Connecting => {
                         if *conn.capture_state.borrow() != CaptureState::Streaming {
@@ -1196,9 +1293,13 @@ impl App {
                 conn.capture_state.replace(next);
             })
             .process(move |stream, _| {
-                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
                 let datas = buffer.datas_mut();
-                let Some(data) = datas.first_mut() else { return };
+                let Some(data) = datas.first_mut() else {
+                    return;
+                };
                 let size = data.chunk().size() as usize;
                 let offset = data.chunk().offset() as usize;
                 if let Some(bytes) = data.data() {
@@ -1216,7 +1317,10 @@ impl App {
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
             &mut [pod],
         )?;
-        Ok(Stream { _listener: listener, _stream: stream })
+        Ok(Stream {
+            _listener: listener,
+            _stream: stream,
+        })
     }
 
     // ── Test section ───────────────────────────────────────────────────────
@@ -1259,7 +1363,9 @@ impl App {
         let listener = stream
             .add_local_listener_with_user_data(())
             .state_changed(move |_, _, _old, new| {
-                let Some(conn) = weak_conn.upgrade() else { return };
+                let Some(conn) = weak_conn.upgrade() else {
+                    return;
+                };
                 let msg = match new {
                     StreamState::Error(msg) => format!("Could not play to speakers: {msg}"),
                     StreamState::Unconnected => "Speaker playback was disconnected.".to_string(),
@@ -1268,16 +1374,29 @@ impl App {
                 conn.preview_failed.replace(Some(msg));
             })
             .process(move |stream, _| {
-                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
                 let requested = buffer.requested() as usize;
                 let datas = buffer.datas_mut();
-                let Some(data) = datas.first_mut() else { return };
+                let Some(data) = datas.first_mut() else {
+                    return;
+                };
                 let mut n = 0;
                 if let Some(bytes) = data.data() {
                     let out = bytemuck_f32_mut(bytes);
-                    n = if requested > 0 { requested.min(out.len()) } else { out.len() };
+                    n = if requested > 0 {
+                        requested.min(out.len())
+                    } else {
+                        out.len()
+                    };
                     let mut e = engine.borrow_mut();
-                    let Engine { preview, shared, hop, .. } = &mut *e;
+                    let Engine {
+                        preview,
+                        shared,
+                        hop,
+                        ..
+                    } = &mut *e;
                     preview.fill(&mut out[..n], shared, *hop);
                 }
                 let chunk = data.chunk_mut();
@@ -1293,7 +1412,10 @@ impl App {
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
             &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
         )?;
-        Ok(Stream { _listener: listener, _stream: stream })
+        Ok(Stream {
+            _listener: listener,
+            _stream: stream,
+        })
     }
 
     fn stop_preview(&self) {
@@ -1302,13 +1424,17 @@ impl App {
             conn.preview_failed.replace(None);
         }
         let mut e = self.engine.borrow_mut();
-        let Engine { preview, shared, .. } = &mut *e;
+        let Engine {
+            preview, shared, ..
+        } = &mut *e;
         preview.set_mode(PreviewMode::Idle, shared);
     }
 
     /// The test section needs a connection and a microphone.
     fn test_conn(&self) -> Option<Rc<Conn>> {
-        let conn = self.current().filter(|c| c.synced.get() && c.capture.borrow().is_some());
+        let conn = self
+            .current()
+            .filter(|c| c.synced.get() && c.capture.borrow().is_some());
         if conn.is_none() {
             self.preview_error(Some("No microphone is available to test.".into()));
         }
@@ -1339,7 +1465,9 @@ impl App {
         self.preview_error(None);
         {
             let mut e = self.engine.borrow_mut();
-            let Engine { preview, shared, .. } = &mut *e;
+            let Engine {
+                preview, shared, ..
+            } = &mut *e;
             preview.set_mode(PreviewMode::Monitoring, shared);
         }
         if !self.ensure_preview_stream(&conn) {
@@ -1375,7 +1503,8 @@ impl App {
     }
 
     fn select_mic(&self, name: String) {
-        self.preferred.replace(Some(name).filter(|n| n != VIRTUAL_NODE_NAME));
+        self.preferred
+            .replace(Some(name).filter(|n| n != VIRTUAL_NODE_NAME));
         self.default_synced.set(false);
         if let Some(conn) = self.current().filter(|c| c.synced.get()) {
             self.sync_default(&conn);
@@ -1404,8 +1533,10 @@ pub fn run(
     notify: impl Fn(Event) + 'static,
 ) -> Result<()> {
     pw::init();
-    let mainloop = pw::main_loop::MainLoopRc::new(None).context("creating the PipeWire main loop")?;
-    let context = pw::context::ContextRc::new(&mainloop, None).context("creating the PipeWire context")?;
+    let mainloop =
+        pw::main_loop::MainLoopRc::new(None).context("creating the PipeWire main loop")?;
+    let context =
+        pw::context::ContextRc::new(&mainloop, None).context("creating the PipeWire context")?;
     let engine = Rc::new(RefCell::new(Engine::new(shared)?));
 
     let app = Rc::new(App {
@@ -1487,18 +1618,31 @@ mod tests {
         let bypass = run_through(&noise, false);
         let cleaned = run_through(&noise, true);
         println!("bypass {bypass:.1} dB, cleaned {cleaned:.1} dB");
-        assert!(bypass - cleaned > 20.0, "only {:.1} dB removed", bypass - cleaned);
+        assert!(
+            bypass - cleaned > 20.0,
+            "only {:.1} dB removed",
+            bypass - cleaned
+        );
     }
 
     #[test]
     fn default_metadata_round_trips() {
-        assert_eq!(parse_default_name(r#"{"name":"alsa_input.x"}"#).as_deref(), Some("alsa_input.x"));
-        assert_eq!(parse_default_name(r#"{ "name" : "a\"b\\c" }"#).as_deref(), Some(r#"a"b\c"#));
+        assert_eq!(
+            parse_default_name(r#"{"name":"alsa_input.x"}"#).as_deref(),
+            Some("alsa_input.x")
+        );
+        assert_eq!(
+            parse_default_name(r#"{ "name" : "a\"b\\c" }"#).as_deref(),
+            Some(r#"a"b\c"#)
+        );
         assert_eq!(parse_default_name("{}"), None);
         assert_eq!(parse_default_name(r#"{"name":""}"#), None);
         assert_eq!(parse_default_name("not json"), None);
         for name in ["alsa_input.usb-Foo_Bar-00.analog-stereo", r#"we"ird\name"#] {
-            assert_eq!(parse_default_name(&default_json(name)).as_deref(), Some(name));
+            assert_eq!(
+                parse_default_name(&default_json(name)).as_deref(),
+                Some(name)
+            );
         }
     }
 
@@ -1506,14 +1650,35 @@ mod tests {
     fn mic_choice_order() {
         let mics = ["c", "b", "a", VIRTUAL_NODE_NAME];
         // Saved choice wins, then the system default, then the current fallback.
-        assert_eq!(choose_mic(&mics, Some("c"), Some("b"), Some("a")).as_deref(), Some("c"));
-        assert_eq!(choose_mic(&mics, Some("gone"), Some("b"), Some("a")).as_deref(), Some("b"));
-        assert_eq!(choose_mic(&mics, Some("gone"), Some("gone2"), Some("c")).as_deref(), Some("c"));
+        assert_eq!(
+            choose_mic(&mics, Some("c"), Some("b"), Some("a")).as_deref(),
+            Some("c")
+        );
+        assert_eq!(
+            choose_mic(&mics, Some("gone"), Some("b"), Some("a")).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            choose_mic(&mics, Some("gone"), Some("gone2"), Some("c")).as_deref(),
+            Some("c")
+        );
         // Otherwise the first by node name.
         assert_eq!(choose_mic(&mics, None, None, None).as_deref(), Some("a"));
-        assert_eq!(choose_mic(&mics, Some("gone"), None, Some("gone")).as_deref(), Some("a"));
+        assert_eq!(
+            choose_mic(&mics, Some("gone"), None, Some("gone")).as_deref(),
+            Some("a")
+        );
         // Esquie itself is never chosen.
-        assert_eq!(choose_mic(&mics, Some(VIRTUAL_NODE_NAME), Some(VIRTUAL_NODE_NAME), None).as_deref(), Some("a"));
+        assert_eq!(
+            choose_mic(
+                &mics,
+                Some(VIRTUAL_NODE_NAME),
+                Some(VIRTUAL_NODE_NAME),
+                None
+            )
+            .as_deref(),
+            Some("a")
+        );
         assert_eq!(choose_mic(&[VIRTUAL_NODE_NAME], None, None, None), None);
         assert_eq!(choose_mic(&[], Some("a"), None, None), None);
     }
@@ -1542,7 +1707,9 @@ mod tests {
     fn clear_audio_drops_stale_samples() {
         let shared = Arc::new(Shared::new(true, 100.0, true, true));
         let mut engine = Engine::new(shared.clone()).unwrap();
-        let noise: Vec<f32> = (0..SAMPLE_RATE / 10).map(|i| ((i % 97) as f32 / 97.0 - 0.5) * 0.2).collect();
+        let noise: Vec<f32> = (0..SAMPLE_RATE / 10)
+            .map(|i| ((i % 97) as f32 / 97.0 - 0.5) * 0.2)
+            .collect();
         engine.start_recording();
         engine.push_input(&noise);
         engine.preview.mode = PreviewMode::Monitoring;
@@ -1550,7 +1717,9 @@ mod tests {
         assert!(!engine.queue.is_empty() && !engine.preview.queue.is_empty());
 
         engine.clear_audio();
-        assert!(engine.queue.is_empty() && engine.input.is_empty() && engine.preview.queue.is_empty());
+        assert!(
+            engine.queue.is_empty() && engine.input.is_empty() && engine.preview.queue.is_empty()
+        );
         assert_eq!(engine.preview.mode, PreviewMode::Idle);
         assert_eq!(shared.preview().0, PreviewMode::Idle);
         assert_eq!(shared.take_levels(), (0.0, 0.0));
@@ -1574,7 +1743,10 @@ mod live {
     #[test]
     #[ignore]
     fn live_engine() {
-        let secs: u64 = std::env::var("ESQUIE_LIVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        let secs: u64 = std::env::var("ESQUIE_LIVE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
         let preferred = std::env::var("ESQUIE_LIVE_MIC").ok();
         let (tx, rx) = pw::channel::channel::<Command>();
         let (ev_tx, ev_rx) = std::sync::mpsc::channel::<String>();
@@ -1614,7 +1786,10 @@ mod live {
 mod tune {
     use super::*;
 
-    const ASSETS: &str = concat!(env!("HOME"), "/.cargo/git/checkouts/deepfilternet-6ca5774fd310b300/978576a/assets");
+    const ASSETS: &str = concat!(
+        env!("HOME"),
+        "/.cargo/git/checkouts/deepfilternet-6ca5774fd310b300/978576a/assets"
+    );
 
     fn wav_mono(path: &str) -> Vec<f32> {
         let b = std::fs::read(path).unwrap();
@@ -1623,12 +1798,17 @@ mod tune {
         while &b[i..i + 4] != b"data" {
             i += 8 + u32::from_le_bytes(b[i + 4..i + 8].try_into().unwrap()) as usize;
         }
-        let pcm: Vec<f32> = b[i + 8..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0).collect();
+        let pcm: Vec<f32> = b[i + 8..]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+            .collect();
         pcm.chunks_exact(ch).map(|f| f[0]).collect()
     }
 
     fn energy_db(x: &[f32]) -> f32 {
-        10.0 * (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).max(1e-12).log10()
+        10.0 * (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32)
+            .max(1e-12)
+            .log10()
     }
 
     /// Noise only (nobody talking): how loud is what's left, per setting?
@@ -1640,7 +1820,14 @@ mod tune {
             let k = 10f32.powf((-30.0 - energy_db(&noise)) / 20.0); // noise at -30 dBFS
             let noise: Vec<f32> = noise.iter().map(|v| v * k).collect();
             println!("\n{noise_file}: input {:.1} dBFS", energy_db(&noise));
-            for (pf, gate, strength) in [(false, false, 100.0), (true, false, 100.0), (false, true, 100.0), (true, true, 100.0), (true, false, 38.5), (true, true, 38.5)] {
+            for (pf, gate, strength) in [
+                (false, false, 100.0),
+                (true, false, 100.0),
+                (false, true, 100.0),
+                (true, true, 100.0),
+                (true, false, 38.5),
+                (true, true, 38.5),
+            ] {
                 let shared = Shared::new(true, crate::settings::strength_to_db(strength), pf, gate);
                 let mut c = Cleaner::new(&shared).unwrap();
                 let hop = c.buf.len();
@@ -1652,7 +1839,8 @@ mod tune {
                 let peak = tail.chunks(hop).map(energy_db).fold(f32::MIN, f32::max);
                 println!(
                     "  strength {strength:>5} extra_cleanup {pf:<5} gate {gate:<5}: left {:>6.1} dBFS avg, loudest 10 ms {:>6.1} dBFS",
-                    energy_db(tail), peak
+                    energy_db(tail),
+                    peak
                 );
             }
         }
@@ -1666,8 +1854,12 @@ mod tune {
             let noise = wav_mono(&format!("{ASSETS}/{noise_file}"));
             for snr in [0.0f32, 10.0] {
                 let n = clean.len();
-                let k = 10f32.powf((energy_db(&clean) - energy_db(&noise[..n.min(noise.len())]) - snr) / 20.0);
-                let mix: Vec<f32> = (0..n).map(|i| (clean[i] + noise[i % noise.len()] * k) * 0.5).collect();
+                let k = 10f32.powf(
+                    (energy_db(&clean) - energy_db(&noise[..n.min(noise.len())]) - snr) / 20.0,
+                );
+                let mix: Vec<f32> = (0..n)
+                    .map(|i| (clean[i] + noise[i % noise.len()] * k) * 0.5)
+                    .collect();
 
                 let shared = Shared::new(true, 100.0, true, false);
                 let mut c = Cleaner::new(&shared).unwrap();
@@ -1676,32 +1868,72 @@ mod tune {
                 let mut out = vec![0.0; frames * hop];
                 let mut lsnr = Vec::new();
                 for f in 0..frames {
-                    lsnr.push(c.process(&mix[f * hop..(f + 1) * hop], &mut out[f * hop..(f + 1) * hop]));
+                    lsnr.push(c.process(
+                        &mix[f * hop..(f + 1) * hop],
+                        &mut out[f * hop..(f + 1) * hop],
+                    ));
                 }
                 // Model delay, by cross-correlating output with clean speech.
                 let delay = (0..2400)
                     .step_by(hop / 4)
-                    .max_by_key(|&d| (out[d..].iter().zip(&clean).map(|(a, b)| a * b).sum::<f32>() * 1e6) as i64)
+                    .max_by_key(|&d| {
+                        (out[d..].iter().zip(&clean).map(|(a, b)| a * b).sum::<f32>() * 1e6) as i64
+                    })
                     .unwrap();
                 // Speech frames: clean-speech energy within 35 dB of its loudest frame.
-                let fe: Vec<f32> = (0..frames).map(|f| energy_db(&clean[f * hop..(f + 1) * hop])).collect();
+                let fe: Vec<f32> = (0..frames)
+                    .map(|f| energy_db(&clean[f * hop..(f + 1) * hop]))
+                    .collect();
                 let peak = fe.iter().cloned().fold(f32::MIN, f32::max);
                 let speech: Vec<bool> = fe.iter().map(|&e| e > peak - 35.0).collect();
                 let (mut ls_s, mut ls_n): (Vec<f32>, Vec<f32>) = (vec![], vec![]);
                 for (f, &l) in lsnr.iter().enumerate() {
-                    if speech[f] { ls_s.push(l) } else { ls_n.push(l) }
+                    if speech[f] {
+                        ls_s.push(l)
+                    } else {
+                        ls_n.push(l)
+                    }
                 }
-                let pct = |v: &mut Vec<f32>, p: f32| { v.sort_by(|a, b| a.total_cmp(b)); v[((v.len() - 1) as f32 * p) as usize] };
+                let pct = |v: &mut Vec<f32>, p: f32| {
+                    v.sort_by(|a, b| a.total_cmp(b));
+                    v[((v.len() - 1) as f32 * p) as usize]
+                };
                 let mut runs = vec![];
                 let mut r = 0;
-                for &sp in &speech { if sp { if r > 0 { runs.push(r) } r = 0 } else { r += 1 } }
-                println!("pause frames {} of {frames}; pauses longer than 250 ms: {:?} frames", ls_n.len(), runs.iter().filter(|&&r| r > 25).collect::<Vec<_>>());
+                for &sp in &speech {
+                    if sp {
+                        if r > 0 {
+                            runs.push(r)
+                        }
+                        r = 0
+                    } else {
+                        r += 1
+                    }
+                }
+                println!(
+                    "pause frames {} of {frames}; pauses longer than 250 ms: {:?} frames",
+                    ls_n.len(),
+                    runs.iter().filter(|&&r| r > 25).collect::<Vec<_>>()
+                );
                 println!(
                     "\n{noise_file} @ {snr} dB SNR (delay {delay}): lsnr speech p10/p50 {:.1}/{:.1}, pauses p50/p90 {:.1}/{:.1}",
-                    pct(&mut ls_s, 0.1), pct(&mut ls_s, 0.5), pct(&mut ls_n, 0.5), pct(&mut ls_n, 0.9)
+                    pct(&mut ls_s, 0.1),
+                    pct(&mut ls_s, 0.5),
+                    pct(&mut ls_n, 0.5),
+                    pct(&mut ls_n, 0.9)
                 );
-                for (open, confirm) in [(-5.0f32, 1.0f32), (-5.0, 2.0), (0.0, 2.0), (0.0, 3.0), (5.0, 2.0)] {
-                    let t = Tuning { gate_open_db: open, gate_confirm_frames: confirm, ..*Tuning::get() };
+                for (open, confirm) in [
+                    (-5.0f32, 1.0f32),
+                    (-5.0, 2.0),
+                    (0.0, 2.0),
+                    (0.0, 3.0),
+                    (5.0, 2.0),
+                ] {
+                    let t = Tuning {
+                        gate_open_db: open,
+                        gate_confirm_frames: confirm,
+                        ..*Tuning::get()
+                    };
                     let mut g = Gate::new(&t, SAMPLE_RATE as f32, hop);
                     let mut gated = out.clone();
                     for f in 0..frames {
@@ -1711,15 +1943,24 @@ mod tune {
                     let (mut sp_o, mut sp_g, mut pz_o, mut pz_g) = (0f64, 0f64, 0f64, 0f64);
                     for f in 0..frames {
                         let a = f * hop + delay;
-                        if a + hop > out.len() { break; }
+                        if a + hop > out.len() {
+                            break;
+                        }
                         let p = |x: &[f32]| x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
-                        if speech[f] { sp_o += p(&out[a..a + hop]); sp_g += p(&gated[a..a + hop]) }
-                        else { pz_o += p(&out[a..a + hop]); pz_g += p(&gated[a..a + hop]) }
+                        if speech[f] {
+                            sp_o += p(&out[a..a + hop]);
+                            sp_g += p(&gated[a..a + hop])
+                        } else {
+                            pz_o += p(&out[a..a + hop]);
+                            pz_g += p(&gated[a..a + hop])
+                        }
                     }
                     let db = |x: f64| 10.0 * x.max(1e-20).log10();
                     println!(
                         "  open {open:>5} confirm {confirm}: speech lost {:.2} dB, noise in pauses {:.1} -> {:.1} dB below speech",
-                        db(sp_o) - db(sp_g), db(sp_o) - db(pz_o), db(sp_g) - db(pz_g)
+                        db(sp_o) - db(sp_g),
+                        db(sp_o) - db(pz_o),
+                        db(sp_g) - db(pz_g)
                     );
                 }
             }

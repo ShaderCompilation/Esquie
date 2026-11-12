@@ -27,7 +27,10 @@ impl Scratch {
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("XDG_RUNTIME_DIR", "/nonexistent/esquie-desktop-test")
             .env("PIPEWIRE_REMOTE", "esquie-desktop-test-missing")
-            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/esquie-desktop-test")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent/esquie-desktop-test",
+            )
             .env("SLINT_BACKEND", "invalid-backend-for-desktop-test");
         for (k, v) in env {
             cmd.env(k, v);
@@ -46,7 +49,10 @@ impl Drop for Scratch {
 }
 
 fn exec_of(entry: &str) -> &str {
-    entry.lines().find_map(|l| l.strip_prefix("Exec=")).expect("Exec line")
+    entry
+        .lines()
+        .find_map(|l| l.strip_prefix("Exec="))
+        .expect("Exec line")
 }
 
 #[test]
@@ -96,11 +102,18 @@ fn refresh_follows_moved_appimage() {
     // Without the AppImage runtime, the ordinary executable path is used.
     scratch.run("--refresh-autostart", &[]);
     let entry = std::fs::read_to_string(scratch.autostart()).unwrap();
-    assert_eq!(exec_of(&entry), format!("{} --hidden", exe.to_str().unwrap()), "{entry}");
+    assert_eq!(
+        exec_of(&entry),
+        format!("{} --hidden", exe.to_str().unwrap()),
+        "{entry}"
+    );
 
     // An entry the user disabled is left alone.
     let disabled = format!("{entry}Hidden=true\n");
     std::fs::write(scratch.autostart(), &disabled).unwrap();
     scratch.run("--refresh-autostart", &appimage_env);
-    assert_eq!(std::fs::read_to_string(scratch.autostart()).unwrap(), disabled);
+    assert_eq!(
+        std::fs::read_to_string(scratch.autostart()).unwrap(),
+        disabled
+    );
 }

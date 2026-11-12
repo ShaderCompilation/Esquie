@@ -19,7 +19,9 @@ fn path() -> Option<PathBuf> {
 /// The entry file is the source of truth, so removing or disabling it from
 /// the desktop's own startup settings is reflected here too.
 pub fn is_enabled() -> bool {
-    path().and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|c| entry_enabled(&c))
+    path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|c| entry_enabled(&c))
 }
 
 pub fn set_enabled(on: bool) -> io::Result<()> {
@@ -88,8 +90,9 @@ fn main_group(contents: &str) -> impl Iterator<Item = (usize, &str, &str)> {
 }
 
 fn entry_enabled(contents: &str) -> bool {
-    !main_group(contents)
-        .any(|(_, k, v)| (k == "Hidden" && v == "true") || (k == "X-GNOME-Autostart-enabled" && v == "false"))
+    !main_group(contents).any(|(_, k, v)| {
+        (k == "Hidden" && v == "true") || (k == "X-GNOME-Autostart-enabled" && v == "false")
+    })
 }
 
 /// `contents` with its `Exec` value replaced, keeping every other line
@@ -121,10 +124,15 @@ mod tests {
     fn enabled_state() {
         let entry = desktop_entry::autostart(Path::new("/usr/bin/esquie")).unwrap();
         assert!(entry_enabled(&entry));
-        assert!(!entry_enabled(&entry.replace("X-GNOME-Autostart-enabled=true", "X-GNOME-Autostart-enabled=false")));
+        assert!(!entry_enabled(&entry.replace(
+            "X-GNOME-Autostart-enabled=true",
+            "X-GNOME-Autostart-enabled=false"
+        )));
         assert!(!entry_enabled(&format!("{entry}Hidden=true\n")));
         // Keys in other groups don't count.
-        assert!(entry_enabled(&format!("{entry}[Desktop Action x]\nHidden=true\n")));
+        assert!(entry_enabled(&format!(
+            "{entry}[Desktop Action x]\nHidden=true\n"
+        )));
     }
 
     #[test]

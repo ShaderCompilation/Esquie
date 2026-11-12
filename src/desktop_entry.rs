@@ -25,7 +25,11 @@ pub fn executable() -> io::Result<PathBuf> {
     )
 }
 
-fn resolve_executable(exe: PathBuf, appimage: Option<OsString>, appdir: Option<OsString>) -> io::Result<PathBuf> {
+fn resolve_executable(
+    exe: PathBuf,
+    appimage: Option<OsString>,
+    appdir: Option<OsString>,
+) -> io::Result<PathBuf> {
     let non_empty = |v: Option<OsString>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
     let (Some(appimage), Some(appdir)) = (non_empty(appimage), non_empty(appdir)) else {
         return Ok(exe);
@@ -90,12 +94,19 @@ const SH_EXEC: &str = r#"exec "$0" "$@""#;
 /// An `Exec` value, already escaped for the desktop file's string syntax.
 fn exec_line(program: &Path, args: &[&str]) -> io::Result<String> {
     let program = program.to_str().ok_or_else(|| {
-        io::Error::other(format!("{} is not valid UTF-8, which desktop entries require", program.display()))
+        io::Error::other(format!(
+            "{} is not valid UTF-8, which desktop entries require",
+            program.display()
+        ))
     })?;
     // GLib looks up the program before expanding `%%`, so it rejects such an
     // entry (and mangles a lone `%`). Arguments expand correctly everywhere,
     // so pass a program path containing `%` to sh as an argument instead.
-    let wrapper: &[&str] = if program.contains('%') { &["sh", "-c", SH_EXEC] } else { &[] };
+    let wrapper: &[&str] = if program.contains('%') {
+        &["sh", "-c", SH_EXEC]
+    } else {
+        &[]
+    };
     let line = wrapper
         .iter()
         .copied()
@@ -111,7 +122,8 @@ fn exec_line(program: &Path, args: &[&str]) -> io::Result<String> {
 /// `%%` for literal percent signs (which are field codes otherwise).
 fn quote_arg(arg: &str) -> String {
     const RESERVED: &[char] = &[
-        ' ', '\t', '\n', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(', ')', '`',
+        ' ', '\t', '\n', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(',
+        ')', '`',
     ];
     let needs_quotes = arg.is_empty() || arg.contains(RESERVED);
     let mut out = String::with_capacity(arg.len() + 2);
@@ -145,7 +157,9 @@ fn escape_value(value: &str) -> io::Result<String> {
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
             c if c.is_control() => {
-                return Err(io::Error::other("desktop entries cannot contain control characters"));
+                return Err(io::Error::other(
+                    "desktop entries cannot contain control characters",
+                ));
             }
             c => out.push(c),
         }
@@ -181,7 +195,9 @@ pub(crate) mod tests {
         let mut chars = unescaped.chars().peekable();
         loop {
             while chars.next_if_eq(&' ').is_some() {}
-            let Some(first) = chars.next() else { return args };
+            let Some(first) = chars.next() else {
+                return args;
+            };
             let mut arg = String::new();
             fn push(arg: &mut String, c: char, chars: &mut std::iter::Peekable<std::str::Chars>) {
                 if c == '%' {
@@ -195,18 +211,30 @@ pub(crate) mod tests {
                         '"' => break,
                         '\\' => {
                             let c = chars.next().expect("dangling backslash");
-                            assert!(matches!(c, '"' | '`' | '$' | '\\'), "invalid quoted escape \\{c}");
+                            assert!(
+                                matches!(c, '"' | '`' | '$' | '\\'),
+                                "invalid quoted escape \\{c}"
+                            );
                             arg.push(c);
                         }
                         c => push(&mut arg, c, &mut chars),
                     }
                 }
-                assert!(matches!(chars.peek(), None | Some(' ')), "text after closing quote");
+                assert!(
+                    matches!(chars.peek(), None | Some(' ')),
+                    "text after closing quote"
+                );
             } else {
-                assert!(!matches!(first, '"' | '\\' | '$' | '`'), "reserved character outside quotes");
+                assert!(
+                    !matches!(first, '"' | '\\' | '$' | '`'),
+                    "reserved character outside quotes"
+                );
                 push(&mut arg, first, &mut chars);
                 while let Some(c) = chars.next_if(|&c| c != ' ') {
-                    assert!(!matches!(c, '"' | '\\' | '$' | '`'), "reserved character outside quotes");
+                    assert!(
+                        !matches!(c, '"' | '\\' | '$' | '`'),
+                        "reserved character outside quotes"
+                    );
                     push(&mut arg, c, &mut chars);
                 }
             }
@@ -226,12 +254,24 @@ pub(crate) mod tests {
     fn exec_quoting_examples() {
         let exec = |p: &str| autostart_exec(Path::new(p)).unwrap();
         assert_eq!(exec("/usr/bin/esquie"), "/usr/bin/esquie --hidden");
-        assert_eq!(exec("/home/a b/Esquie.AppImage"), r#""/home/a b/Esquie.AppImage" --hidden"#);
+        assert_eq!(
+            exec("/home/a b/Esquie.AppImage"),
+            r#""/home/a b/Esquie.AppImage" --hidden"#
+        );
         assert_eq!(exec(r#"/x/say "hi"/h"#), r#""/x/say \\"hi\\"/h" --hidden"#);
         assert_eq!(exec(r"/x/back\slash/h"), r#""/x/back\\\\slash/h" --hidden"#);
-        assert_eq!(exec("/x/100%/h"), r#"sh -c "exec \\"\\$0\\" \\"\\$@\\"" /x/100%%/h --hidden"#);
-        assert_eq!(exec("/x/100% sure/h"), r#"sh -c "exec \\"\\$0\\" \\"\\$@\\"" "/x/100%% sure/h" --hidden"#);
-        assert_eq!(exec("/x/$HOME/`id`/h"), r#""/x/\\$HOME/\\`id\\`/h" --hidden"#);
+        assert_eq!(
+            exec("/x/100%/h"),
+            r#"sh -c "exec \\"\\$0\\" \\"\\$@\\"" /x/100%%/h --hidden"#
+        );
+        assert_eq!(
+            exec("/x/100% sure/h"),
+            r#"sh -c "exec \\"\\$0\\" \\"\\$@\\"" "/x/100%% sure/h" --hidden"#
+        );
+        assert_eq!(
+            exec("/x/$HOME/`id`/h"),
+            r#""/x/\\$HOME/\\`id\\`/h" --hidden"#
+        );
         assert_eq!(exec("/x/it's/h"), r#""/x/it's/h" --hidden"#);
     }
 
@@ -251,7 +291,10 @@ pub(crate) mod tests {
             assert_eq!(command(parse_exec(&exec)), [path, HIDDEN_FLAG], "{exec}");
             assert_eq!(exec.starts_with("sh "), path.contains('%'), "{exec}");
             let launcher = launcher(Path::new(path)).unwrap();
-            let line = launcher.lines().find_map(|l| l.strip_prefix("Exec=")).unwrap();
+            let line = launcher
+                .lines()
+                .find_map(|l| l.strip_prefix("Exec="))
+                .unwrap();
             assert_eq!(command(parse_exec(line)), [path], "{line}");
         }
     }
@@ -266,7 +309,8 @@ pub(crate) mod tests {
 
     #[test]
     fn appimage_uses_persistent_path() {
-        let dir = std::env::temp_dir().join(format!("esquie-appimage-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("esquie-appimage-test-{}", std::process::id()));
         let mount = dir.join(".mount_EsquieAbCdEf");
         std::fs::create_dir_all(mount.join("usr/bin")).unwrap();
         let image = dir.join("My Apps/Esquie.AppImage");
@@ -283,7 +327,10 @@ pub(crate) mod tests {
         assert_eq!(resolve(None, None).unwrap(), exe);
         assert_eq!(resolve(None, some(&mount)).unwrap(), exe);
         // Environment inherited from an unrelated AppImage.
-        assert_eq!(resolve(some(&image), some(&dir.join("elsewhere"))).unwrap(), exe);
+        assert_eq!(
+            resolve(some(&image), some(&dir.join("elsewhere"))).unwrap(),
+            exe
+        );
         // A mount without a usable AppImage path must not be referenced.
         assert!(resolve(some(&dir.join("missing.AppImage")), some(&mount)).is_err());
         assert!(resolve(some(Path::new("relative.AppImage")), some(&mount)).is_err());

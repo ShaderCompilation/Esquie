@@ -35,10 +35,20 @@ pub type Handle = ksni::blocking::Handle<Tray>;
 /// Starts the tray service and returns its handle with whether the icon is
 /// visible right now. `None` means no tray is possible (e.g. no D-Bus session).
 /// Later availability changes arrive as [`Action::Available`].
-pub fn spawn(enabled: bool, autostart: bool, on_action: impl Fn(Action) + Send + 'static) -> Option<(Handle, bool)> {
+pub fn spawn(
+    enabled: bool,
+    autostart: bool,
+    on_action: impl Fn(Action) + Send + 'static,
+) -> Option<(Handle, bool)> {
     // Optimistic: registration failures during spawn call watcher_offline.
     let available = Arc::new(AtomicBool::new(true));
-    let tray = Tray { enabled, autostart, icon: render_icon(), available: available.clone(), on_action: Box::new(on_action) };
+    let tray = Tray {
+        enabled,
+        autostart,
+        icon: render_icon(),
+        available: available.clone(),
+        on_action: Box::new(on_action),
+    };
     // Keep running without a watcher so a tray that starts later still gets
     // the icon (ksni re-registers when the watcher's bus name appears).
     match tray.assume_sni_available(true).spawn() {
@@ -66,7 +76,12 @@ impl ksni::Tray for Tray {
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
             title: "Esquie".into(),
-            description: if self.enabled { "Noise removal is on" } else { "Noise removal is off" }.into(),
+            description: if self.enabled {
+                "Noise removal is on"
+            } else {
+                "Noise removal is off"
+            }
+            .into(),
             ..Default::default()
         }
     }
@@ -131,7 +146,9 @@ impl ksni::Tray for Tray {
 
 /// Rasterize the app icon into the ARGB32 pixmaps the tray protocol wants.
 fn render_icon() -> Vec<Icon> {
-    let Ok(tree) = resvg::usvg::Tree::from_data(include_bytes!("../ui/icon.svg"), &Default::default()) else {
+    let Ok(tree) =
+        resvg::usvg::Tree::from_data(include_bytes!("../ui/icon.svg"), &Default::default())
+    else {
         return Vec::new();
     };
     [22u32, 32, 48, 64]
@@ -139,7 +156,11 @@ fn render_icon() -> Vec<Icon> {
         .filter_map(|size| {
             let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size)?;
             let scale = size as f32 / tree.size().width();
-            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::from_scale(scale, scale),
+                &mut pixmap.as_mut(),
+            );
             let data = pixmap
                 .pixels()
                 .iter()
@@ -148,7 +169,11 @@ fn render_icon() -> Vec<Icon> {
                     [c.alpha(), c.red(), c.green(), c.blue()]
                 })
                 .collect();
-            Some(Icon { width: size as i32, height: size as i32, data })
+            Some(Icon {
+                width: size as i32,
+                height: size as i32,
+                data,
+            })
         })
         .collect()
 }
@@ -159,8 +184,8 @@ fn render_icon() -> Vec<Icon> {
 #[cfg(test)]
 mod live {
     use super::*;
-    use std::sync::mpsc::{Receiver, channel};
     use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
 
     struct Watcher(Arc<Mutex<Vec<String>>>);
@@ -201,11 +226,16 @@ mod live {
     }
 
     fn next(rx: &Receiver<bool>) -> bool {
-        rx.recv_timeout(Duration::from_secs(5)).expect("availability change")
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("availability change")
     }
 
     fn assert_quiet(rx: &Receiver<bool>) {
-        assert_eq!(rx.recv_timeout(Duration::from_millis(300)).ok(), None, "unexpected availability change");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(300)).ok(),
+            None,
+            "unexpected availability change"
+        );
     }
 
     fn spawn_reporting() -> (Handle, bool, Receiver<bool>) {

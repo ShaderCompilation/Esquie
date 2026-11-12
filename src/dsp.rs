@@ -70,7 +70,10 @@ impl Tuning {
                 ("ESQUIE_GATE_FLOOR_DB", &mut t.gate_floor_db),
             ];
             for (key, field) in fields {
-                if let Some(v) = std::env::var(key).ok().and_then(|v| v.trim().parse::<f32>().ok()) {
+                if let Some(v) = std::env::var(key)
+                    .ok()
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                {
                     *field = v;
                 }
             }
@@ -121,7 +124,9 @@ impl HighPass {
         }
         for s in buf {
             let x = *s;
-            let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+            let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+                - self.a1 * self.y1
+                - self.a2 * self.y2;
             self.x2 = self.x1;
             self.x1 = x;
             self.y2 = self.y1;
@@ -184,7 +189,11 @@ impl Gate {
             self.held -= 1;
         }
         let target = if self.held > 0 { 1.0 } else { self.floor };
-        let coef = if target > self.gain { self.attack } else { self.release };
+        let coef = if target > self.gain {
+            self.attack
+        } else {
+            self.release
+        };
         for s in frame {
             self.gain += (target - self.gain) * coef;
             *s *= self.gain;
@@ -208,7 +217,9 @@ mod tests {
     }
 
     fn sine(hz: f32, n: usize) -> Vec<f32> {
-        (0..n).map(|i| (2.0 * std::f32::consts::PI * hz * i as f32 / 48_000.0).sin()).collect()
+        (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * hz * i as f32 / 48_000.0).sin())
+            .collect()
     }
 
     #[test]
@@ -219,8 +230,14 @@ mod tests {
         HighPass::new(80.0, 48_000.0).process(&mut voice);
         let tail = 24_000..;
         // 2nd order at 80 Hz: 30 Hz is down ~17 dB.
-        assert!(rms(&low[tail.clone()]) < 0.2 * std::f32::consts::FRAC_1_SQRT_2, "30 Hz not cut");
-        assert!(rms(&voice[tail]) > 0.95 * std::f32::consts::FRAC_1_SQRT_2, "300 Hz cut");
+        assert!(
+            rms(&low[tail.clone()]) < 0.2 * std::f32::consts::FRAC_1_SQRT_2,
+            "30 Hz not cut"
+        );
+        assert!(
+            rms(&voice[tail]) > 0.95 * std::f32::consts::FRAC_1_SQRT_2,
+            "300 Hz cut"
+        );
     }
 
     #[test]
