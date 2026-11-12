@@ -22,8 +22,26 @@ audio recovery after device changes, suspend/resume, or PipeWire restarts.
 [Clean builds and automated checks pass across the initial distro matrix](docs/phase1-validation.md).
 Esquie waits for PipeWire if it starts first, reconnects after PipeWire or
 WirePlumber restarts, and falls back to another microphone while the selected
-one is unplugged ([recovery checks](docs/phase2-validation.md)). Desktop and
-hardware coverage still needs validation.
+one is unplugged ([recovery checks](docs/phase2-validation.md)). The same
+AppImage runs against each matrix distro's own PipeWire in runtime-only
+containers ([AppImage checks](docs/phase4-validation.md)). Desktop and hardware
+coverage still needs validation.
+
+## AppImage
+
+`Esquie-<version>-x86_64.AppImage` runs on x86_64 desktops with PipeWire 1.0+
+without Rust or development packages. It uses your system's PipeWire library,
+plugins, and configuration, and never starts its own audio server.
+
+```sh
+sha256sum --check Esquie-0.1.0-x86_64.AppImage.sha256
+chmod +x Esquie-0.1.0-x86_64.AppImage
+./Esquie-0.1.0-x86_64.AppImage
+```
+
+See [running the AppImage](docs/appimage.md) for host prerequisites, menu
+integration, manual updates, and what to do when FUSE is unavailable. To build
+it yourself, see [building the AppImage](docs/building.md#building-the-appimage).
 
 ## Build & run
 

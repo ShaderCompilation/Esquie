@@ -1,0 +1,7 @@
+# Pinned AppImage build inputs, checked with `sha256sum --check`.
+# Update a pin only together with its URL in packaging/appimage/container-build.sh.
+# Digests match the ones GitHub and static.rust-lang.org publish for each file.
+b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55  rustup-init
+c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  linuxdeploy-x86_64.AppImage
+ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool-x86_64.AppImage
+2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime-x86_64

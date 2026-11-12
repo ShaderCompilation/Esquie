@@ -71,7 +71,7 @@ libraries are supplied by each distro's dependency resolver.
 | --- | --- | --- | --- |
 | Ubuntu 24.04/26.04, Debian 13 | `pipewire wireplumber pipewire-pulse libpipewire-0.3-0t64` | `libwayland-client0 libwayland-cursor0 libwayland-egl1 libx11-6 libx11-xcb1 libxcb1 libxcursor1 libxi6 libxrandr2 libxinerama1 libxkbcommon0 libxkbcommon-x11-0 fontconfig libfreetype6 fonts-dejavu-core` | `libegl1 libgl1` and the appropriate graphics driver |
 | Fedora 44/45 | `pipewire pipewire-libs wireplumber pipewire-pulseaudio` | `libwayland-client libwayland-cursor libwayland-egl libX11 libX11-xcb libxcb libXcursor libXi libXrandr libXinerama libxkbcommon libxkbcommon-x11 fontconfig freetype dejavu-sans-fonts` | `mesa-libEGL mesa-libGL` and the appropriate graphics driver |
-| Arch Linux | `pipewire wireplumber pipewire-pulse` | `wayland libx11 libxcb libxcursor libxi libxrandr libxinerama libxkbcommon libxkbcommon-x11 fontconfig freetype2 ttf-dejavu` | `libglvnd mesa` or the appropriate graphics driver |
+| Arch Linux | `pipewire pipewire-audio wireplumber pipewire-pulse` | `wayland libx11 libxcb libxcursor libxi libxrandr libxinerama libxkbcommon libxkbcommon-x11 fontconfig freetype2 ttf-dejavu` | `libglvnd mesa` or the appropriate graphics driver |
 
 Use the existing desktop's D-Bus installation (`dbus-user-session` on
 Debian/Ubuntu; `dbus` on Fedora/Arch). Development package installation in CI
@@ -135,3 +135,67 @@ current packages). These records identify a validation environment; they do
 not promise byte-identical builds or pin OS package repositories to snapshots.
 Wayland rendering, accessibility, real audio, and desktop/hardware checks are
 separate validation work described in the compatibility plan.
+
+## Building the AppImage
+
+The release AppImage is built in a clean Ubuntu 24.04 container, the oldest
+supported baseline, so it runs on newer glibc versions. It needs Podman or
+Docker on the host (set `CONTAINER_ENGINE` to choose one):
+
+```sh
+bash packaging/appimage/build.sh
+bash packaging/appimage/test.sh            # all six matrix images
+bash packaging/appimage/test.sh fedora:45  # or selected images
+```
+
+`build.sh` pulls `ubuntu:24.04`, records its digest, and runs
+`packaging/appimage/container-build.sh` in it. That script installs the build
+dependencies above and downloads pinned tools, checking each against
+`packaging/appimage/tools.sha256` before running any of them:
+
+| Tool | Pinned release |
+| --- | --- |
+| rustup-init | 1.29.3 (then the toolchain from `rust-toolchain.toml`) |
+| linuxdeploy | `1-alpha-20251107-1` |
+| appimagetool | `1.9.1` |
+| AppImage type 2 runtime | `20251108` |
+
+It then builds with `--release --locked` and `-C target-cpu=x86-64` into
+`target/appimage-build` (kept separate from host builds; delete it for a
+from-scratch build), lets linuxdeploy assemble the AppDir from the binary, the
+generated launcher entry (`Exec=esquie`), and `ui/icon.svg`, and packs it with
+appimagetool and the pinned runtime. Results:
+
+- `target/appimage/Esquie-<version>-x86_64.AppImage` and its `.sha256`
+- `target/appimage/evidence/`: image digest, OS release, installed packages,
+  compiler and PipeWire header versions, lockfile, tool checksums, linuxdeploy
+  and appimagetool logs, and the payload inspection
+
+linuxdeploy bundles any library dependency that is not on its standard
+excludelist (glibc and the loader, libgcc_s, fontconfig/FreeType, X11/Wayland,
+and GL/EGL drivers stay on the host). `libpipewire-0.3.so.0` is excluded
+explicitly: the host's copy must load the host's SPA plugins and read the host's
+configuration. The current binary's only other dependencies are on the
+excludelist, so the payload is the executable, desktop entry, and icon.
+`packaging/appimage/inspect.sh` fails the build if the AppImage is not type 2,
+bundles PipeWire, its plugins or configuration, an audio service, glibc, the
+loader, or graphics drivers, changes the environment through `AppRun`, or no
+longer links the host's `libpipewire-0.3.so.0`.
+
+`test.sh` checks the `.sha256`, then runs the AppImage in a fresh container per
+image with only runtime packages installed (the script fails if Rust, a C
+compiler, pkg-config, or PipeWire headers are present). Only the AppImage and
+the test script are mounted. Each run checks `--version`, the launcher entry's
+path, and manual extraction; then it starts the distro's own PipeWire and
+WirePlumber under a private D-Bus session, adds a synthetic microphone, and runs
+the AppImage on Xvfb with the software renderer. It passes when Esquie's
+virtual microphone appears and the synthetic microphone is linked to its capture
+stream, with `libpipewire` and SPA plugins loaded from the host and no
+PipeWire variables added to Esquie's environment. Containers have no FUSE, so
+these runs use `APPIMAGE_EXTRACT_AND_RUN=1`; FUSE mounting is checked on a host.
+Logs, package lists, PipeWire versions, and the loaded library paths are written
+to `target/appimage/test/<image>/`.
+
+To update a pinned tool, change its URL in `container-build.sh` and its line in
+`tools.sha256`, using the digest published with the release, then rebuild and
+rerun the tests.
