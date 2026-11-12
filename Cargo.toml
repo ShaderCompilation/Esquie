@@ -17,6 +17,10 @@ slint = { version = "1.18", default-features = false, features = [
     "software-renderer-path",
     "accessibility",
 ] }
+rfd = { version = "0.15", default-features = false, features = [
+    "xdg-portal",
+    "async-std",
+] }
 anyhow = "1"
 ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
 resvg = "0.48"

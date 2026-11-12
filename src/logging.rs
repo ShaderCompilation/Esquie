@@ -137,8 +137,6 @@ fn push_ring(line: String) {
 }
 
 /// The ring's contents, oldest first, one entry per line.
-/// Consumed by the diagnostics export bundle (Phase 3).
-#[allow(dead_code)]
 pub fn ring_contents() -> String {
     let Some(ring) = RING.get() else {
         return String::new();
@@ -215,8 +213,6 @@ pub fn take_last_crash() -> Option<String> {
 }
 
 /// What [`take_last_crash`] found this run, for the UI ("crashed last time").
-/// Consumed by the diagnostics UI (Phase 3).
-#[allow(dead_code)]
 pub fn last_crash() -> Option<String> {
     LAST_CRASH.get().cloned()
 }

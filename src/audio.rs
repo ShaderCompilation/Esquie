@@ -494,6 +494,12 @@ fn mono_f32_params() -> Vec<u8> {
     .into_inner()
 }
 
+/// The mono f32 format parsed from `params` as a Pod, propagating parse
+/// errors instead of panicking inside stream setup.
+fn format_pod(params: &[u8]) -> Result<&spa::pod::Pod> {
+    spa::pod::Pod::from_bytes(params).context("could not build the audio format pod")
+}
+
 /// How often the audio thread checks timers, retries and pending teardown.
 const TICK: Duration = Duration::from_millis(50);
 /// A capture stream that has not delivered audio by then has no usable route.
@@ -1234,7 +1240,7 @@ impl App {
             spa::utils::Direction::Output,
             None,
             StreamFlags::MAP_BUFFERS,
-            &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
+            &mut [format_pod(&params)?],
         )?;
         Ok(Stream {
             _listener: listener,
@@ -1305,7 +1311,7 @@ impl App {
             })
             .register()?;
         let params = mono_f32_params();
-        let pod = spa::pod::Pod::from_bytes(&params).unwrap();
+        let pod = format_pod(&params)?;
         stream.connect(
             spa::utils::Direction::Input,
             None,
@@ -1407,7 +1413,7 @@ impl App {
             spa::utils::Direction::Output,
             None,
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-            &mut [spa::pod::Pod::from_bytes(&params).unwrap()],
+            &mut [format_pod(&params)?],
         )?;
         Ok(Stream {
             _listener: listener,

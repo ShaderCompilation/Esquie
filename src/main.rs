@@ -1,6 +1,7 @@
 mod audio;
 mod autostart;
 mod desktop_entry;
+mod diagnostics;
 mod dsp;
 mod file_ops;
 mod installation;
@@ -89,6 +90,7 @@ fn main() -> anyhow::Result<()> {
     ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
     ui.set_autostart(autostart::is_enabled());
     let handoff = installation_ui::setup(&ui, settings.clone());
+    diagnostics::setup(&ui, crashed_last_run);
 
     // Tray icon. Its callbacks run on the tray thread, so hop to the UI thread.
     // `has-tray` tracks whether the icon is visible right now.

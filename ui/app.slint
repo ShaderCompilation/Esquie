@@ -328,11 +328,15 @@ export component AppWindow inherits Window {
     in property <bool> can-switch;
     in property <bool> automatic-checks;
     in property <string> app-version;
+    in property <bool> crashed-last-run;
+    in property <bool> diagnostics-busy;
+    in property <string> diagnostics-message;
     callback consider-install-prompt();
     callback dismiss-install-prompt(bool);
     callback directory-changed(string);
     callback installation-requested(int);
     callback switch-installation();
+    callback export-diagnostics();
 
     callback mic-selected(int);
     callback enabled-changed(bool);
@@ -460,6 +464,22 @@ export component AppWindow inherits Window {
                 subtitle: "Esquie " + root.app-version + ". Update checking and downloading will be available in a later version. No network checks run yet.";
                 OptionRow { title: "Automatic update checks"; description: "Saved preference for when update checks become available. Checks will use the network."; checked: root.automatic-checks; enabled: false; }
                 Button { text: "Check now"; enabled: false; }
+            }
+            if root.settings-open: Card {
+                title: "Diagnostics";
+                subtitle: "Bundle the app version, system and PipeWire info, recent logs and crash details into one plain-text file. You choose where to save it; nothing leaves your machine.";
+                if root.crashed-last-run: Text {
+                    text: "Esquie crashed on the previous run and has recovered. Exporting diagnostics can help pinpoint the cause.";
+                    color: Theme.warn;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: root.diagnostics-busy ? "Preparing…" : "Export diagnostics";
+                    enabled: !root.diagnostics-busy;
+                    clicked => { root.export-diagnostics(); }
+                }
+                if root.diagnostics-message != "": Text { text: root.diagnostics-message; color: Theme.text; wrap: word-wrap; }
             }
 
             if !root.settings-open: VerticalLayout {

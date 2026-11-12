@@ -9,10 +9,18 @@ use crate::{
 };
 use slint::ComponentHandle;
 
+/// Lock a mutex, recovering from poisoning: a panic in another thread must
+/// not take the UI down too, and the guarded data is still readable.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option<PathBuf>>> {
     let handoff = Arc::new(Mutex::new(None));
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
-    let initial = settings.lock().unwrap().clone();
+    let initial = lock(&settings).clone();
     ui.set_automatic_checks(initial.automatic_checks);
     if let Ok(locations) = Locations::get() {
         ui.set_install_directory(
@@ -35,7 +43,7 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option
                 return;
             }
             ui.set_prompt_considered(true);
-            let settings = settings.lock().unwrap();
+            let settings = lock(&settings);
             let eligible = Locations::get()
                 .and_then(|l| Inventory::current(&l, &settings))
                 .is_ok_and(|i| {
@@ -51,7 +59,7 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option
             if let Some(ui) = weak.upgrade() {
                 ui.set_install_prompt(false);
             }
-            let mut s = settings.lock().unwrap();
+            let mut s = lock(&settings);
             s.install_prompt = if never {
                 InstallPrompt::Never
             } else {
@@ -70,7 +78,7 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option
     {
         let settings = settings.clone();
         ui.on_directory_changed(move |value| {
-            let mut s = settings.lock().unwrap();
+            let mut s = lock(&settings);
             s.install_directory = Some(PathBuf::from(value.as_str()));
             s.save();
         });
@@ -109,9 +117,9 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option
             if ui.get_installation_busy() {
                 return;
             }
-            if let Some(target) = settings.lock().unwrap().installed_path.clone() {
+            if let Some(target) = lock(&settings).installed_path.clone() {
                 if target.is_file() {
-                    *handoff.lock().unwrap() = Some(target);
+                    *lock(&handoff) = Some(target);
                     let _ = slint::quit_event_loop();
                 } else {
                     ui.set_installation_message(
@@ -130,12 +138,12 @@ fn run_operation(
     settings: Arc<Mutex<Settings>>,
     weak: slint::Weak<AppWindow>,
 ) {
-    let initial = settings.lock().unwrap().clone();
+    let initial = lock(&settings).clone();
     let result = operate(action, &directory, &initial);
     // Merge into the latest settings so audio edits during the copy survive.
     let mut save_error = None;
     if let Ok(Outcome::Complete { target, .. }) = &result {
-        let mut s = settings.lock().unwrap();
+        let mut s = lock(&settings);
         if action != 4 {
             s.installed_path = Some(target.clone());
         }
@@ -143,7 +151,7 @@ fn run_operation(
         s.install_prompt = InstallPrompt::Never;
         save_error = s.try_save().err();
     }
-    let snapshot = settings.lock().unwrap().clone();
+    let snapshot = lock(&settings).clone();
     let _ =
         weak.upgrade_in_event_loop(move |ui| finish(&ui, action, result, &snapshot, save_error));
 }
