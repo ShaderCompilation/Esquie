@@ -290,7 +290,8 @@ export component AppWindow inherits Window {
     icon: @image-url("icon.svg");
     preferred-width: 460px;
     min-width: 400px;
-    preferred-height: 880px;
+    preferred-height: 740px;
+    min-height: 600px;
     background: Theme.bg;
     default-font-size: 14px;
 
@@ -355,6 +356,9 @@ export component AppWindow inherits Window {
     private property <bool> has-mic: root.mics.length > 0;
     private property <bool> in-use: root.users != "";
     private property <bool> installation-ready: root.installed-path != "";
+    // Idle with no clip yet: collapse the test card to a single button row.
+    private property <bool> test-collapsed:
+        root.test-mode == TestMode.idle && root.clip-length == 0;
 
     pure function seconds(s: float) -> string {
         "0:" + (s < 9.5 ? "0" : "") + Math.round(s)
@@ -476,6 +480,17 @@ export component AppWindow inherits Window {
                 subtitle: "Esquie " + root.app-version + ". Update checking and downloading will be available in a later version. No network checks run yet.";
                 OptionRow { title: "Automatic update checks"; description: "Saved preference for when update checks become available. Checks will use the network."; checked: root.automatic-checks; enabled: false; }
                 Button { text: "Check now"; enabled: false; }
+            }
+            if root.settings-open: Card {
+                title: "Startup";
+                OptionRow {
+                    title: "Start on login";
+                    description: root.has-tray
+                        ? "Starts Esquie when you log in. Closing the window keeps Esquie running in the tray; right-click the tray icon to quit."
+                        : "Starts Esquie when you log in.";
+                    checked <=> root.autostart;
+                    toggled(on) => { root.autostart-changed(on); }
+                }
             }
             if root.settings-open: Card {
                 title: "Diagnostics";
@@ -628,8 +643,10 @@ export component AppWindow inherits Window {
 
                 // Test
                 Card {
-                    title: "Test how you sound";
-                    subtitle: "Record a few seconds, then compare the original and the cleaned version.";
+                    title: root.test-collapsed ? "" : "Test how you sound";
+                    subtitle: root.test-collapsed
+                        ? ""
+                        : "Record a few seconds, then compare the original and the cleaned version.";
 
                     if root.test-mode == TestMode.recording: VerticalLayout {
                         spacing: 10px;
@@ -804,34 +821,6 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                             horizontal-stretch: 1;
                             vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Startup
-                Card {
-                    HorizontalLayout {
-                        spacing: 12px;
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            horizontal-stretch: 1;
-                            Text { text: "Start on login"; font-size: 14px; font-weight: 600; color: Theme.text; }
-                            Text {
-                                text: root.has-tray
-                                    ? "Closing the window keeps Esquie running in the tray. Right-click the tray icon to quit."
-                                    : "Starts Esquie when you log in.";
-                                font-size: 12px;
-                                color: Theme.text-dim;
-                                wrap: word-wrap;
-                            }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            Switch {
-                                checked <=> root.autostart;
-                                toggled => { root.autostart-changed(self.checked); }
-                            }
                         }
                     }
                 }

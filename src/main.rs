@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use audio::{Command, Event, PreviewMode, Shared, Status};
 use settings::{Settings, strength_to_db};
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, LogicalSize, Model, ModelRc, SharedString, VecModel};
 use tracing::{error, info, warn};
 
 slint::include_modules!();
@@ -105,6 +105,10 @@ fn main() -> anyhow::Result<()> {
     ui.set_extra_cleanup(initial.extra_cleanup);
     ui.set_gate(initial.gate);
     ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
+    // Restore the window size from the previous session, if any.
+    if let Some((w, h)) = initial.window_size {
+        ui.window().set_size(LogicalSize::new(w as f32, h as f32));
+    }
     ui.set_autostart(autostart::is_enabled());
     let handoff = installation_ui::setup(&ui, settings.clone());
     diagnostics::setup(&ui, crashed_last_run);
@@ -123,9 +127,13 @@ fn main() -> anyhow::Result<()> {
     // `has-tray` tracks whether the icon is visible right now.
     let spawned = {
         let ui_weak = ui.as_weak();
+        let settings = settings.clone();
         tray::spawn(initial.enabled, ui.get_autostart(), move |action| {
+            let settings = settings.clone();
             let _ = ui_weak.upgrade_in_event_loop(move |ui| match action {
                 tray::Action::ToggleWindow if ui.window().is_visible() => {
+                    // Hiding via the tray: remember the size before it goes away.
+                    save_window_size(&ui, &settings);
                     let _ = ui.hide();
                 }
                 tray::Action::ToggleWindow | tray::Action::ShowWindow => {
@@ -306,9 +314,13 @@ fn main() -> anyhow::Result<()> {
     // the tray can come and go.
     {
         let ui_weak = ui.as_weak();
+        let settings = settings.clone();
         ui.window().on_close_requested(move || {
-            if !ui_weak.upgrade().is_some_and(|ui| ui.get_has_tray()) {
-                let _ = slint::quit_event_loop();
+            if let Some(ui) = ui_weak.upgrade() {
+                save_window_size(&ui, &settings);
+                if !ui.get_has_tray() {
+                    let _ = slint::quit_event_loop();
+                }
             }
             slint::CloseRequestResponse::HideWindow
         });
@@ -345,6 +357,15 @@ fn main() -> anyhow::Result<()> {
             .spawn()?;
     }
     Ok(())
+}
+
+/// Remember the current window size (in logical pixels) so the next launch
+/// starts with the same geometry.
+fn save_window_size(ui: &AppWindow, settings: &Arc<Mutex<Settings>>) {
+    let logical = ui.window().size().to_logical(ui.window().scale_factor());
+    let mut s = settings.lock().unwrap();
+    s.window_size = Some((logical.width.round() as u32, logical.height.round() as u32));
+    s.save();
 }
 
 /// Show the window if it is still hidden without a tray after [`TRAY_GRACE`],

@@ -16,6 +16,8 @@ pub struct Settings {
     pub automatic_checks: bool,
     pub last_check_attempt: Option<u64>,
     pub skipped_version: Option<String>,
+    // Restored window size (width, height) in logical pixels.
+    pub window_size: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,6 +42,7 @@ impl Default for Settings {
             automatic_checks: true,
             last_check_attempt: None,
             skipped_version: None,
+            window_size: None,
         }
     }
 }
@@ -87,6 +90,17 @@ impl Settings {
                 Some(("automatic_checks", v)) => s.automatic_checks = v != "false",
                 Some(("last_check_attempt", v)) => s.last_check_attempt = v.parse().ok(),
                 Some(("skipped_version", v)) => s.skipped_version = serde_json::from_str(v).ok(),
+                Some(("window_size", v)) => {
+                    // "width height" in logical pixels, clamped to a sane range.
+                    s.window_size = v
+                        .split_whitespace()
+                        .map(|t| t.parse::<u32>().ok())
+                        .collect::<Option<Vec<_>>>()
+                        .and_then(|dims| match dims.as_slice() {
+                            [w, h] => Some(((*w).clamp(400, 1000), (*h).clamp(400, 1400))),
+                            _ => None,
+                        })
+                }
                 _ => {}
             }
         }
@@ -144,6 +158,9 @@ impl Settings {
         if let Some(attempt) = self.last_check_attempt {
             text.push_str(&format!("last_check_attempt={attempt}\n"));
         }
+        if let Some((w, h)) = self.window_size {
+            text.push_str(&format!("window_size={w} {h}\n"));
+        }
         text
     }
 }
@@ -184,6 +201,7 @@ mod tests {
             automatic_checks: false,
             last_check_attempt: Some(1790000000),
             skipped_version: Some("1.2.3".into()),
+            window_size: Some((460, 740)),
             ..Settings::default()
         };
         let loaded = Settings::parse(&s.serialize());
@@ -193,6 +211,7 @@ mod tests {
         assert_eq!(loaded.automatic_checks, s.automatic_checks);
         assert_eq!(loaded.last_check_attempt, s.last_check_attempt);
         assert_eq!(loaded.skipped_version, s.skipped_version);
+        assert_eq!(loaded.window_size, s.window_size);
         assert!(loaded.enabled);
         assert_eq!(
             Settings::parse("install_prompt=later").install_prompt,
@@ -203,7 +222,7 @@ mod tests {
     #[test]
     fn malformed_new_fields_do_not_break_old_settings() {
         let s = Settings::parse(
-            "strength=NaN\nlast_check_attempt=bad\ninstall_directory=bad\nskipped_version=bad\ninstall_prompt=bad\nmic=original\n",
+            "strength=NaN\nlast_check_attempt=bad\ninstall_directory=bad\nskipped_version=bad\ninstall_prompt=bad\nwindow_size=bad\nwindow_size=100\nwindow_size=1 2 3\nmic=original\n",
         );
         assert_eq!(s.strength, 100.0);
         assert_eq!(s.mic.as_deref(), Some("original"));
@@ -212,6 +231,17 @@ mod tests {
             s.install_directory.is_none()
                 && s.last_check_attempt.is_none()
                 && s.skipped_version.is_none()
+                && s.window_size.is_none()
+        );
+    }
+
+    #[test]
+    fn window_size_is_clamped_to_a_sane_range() {
+        let s = Settings::parse("window_size=10 9999\n");
+        assert_eq!(s.window_size, Some((400, 1400)));
+        assert_eq!(
+            Settings::parse("window_size=1000 400").window_size,
+            Some((1000, 400))
         );
     }
 }
