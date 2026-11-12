@@ -320,6 +320,8 @@ export component AppWindow inherits Window {
     in-out property <bool> prompt-considered;
     in property <string> installation-info;
     in property <string> installation-message;
+    in property <string> installed-path;
+    in-out property <bool> installation-options-open;
     in-out property <string> install-directory;
     in property <bool> installation-busy;
     in-out property <bool> install-collision;
@@ -352,6 +354,7 @@ export component AppWindow inherits Window {
 
     private property <bool> has-mic: root.mics.length > 0;
     private property <bool> in-use: root.users != "";
+    private property <bool> installation-ready: root.installed-path != "";
 
     pure function seconds(s: float) -> string {
         "0:" + (s < 9.5 ? "0" : "") + Math.round(s)
@@ -426,37 +429,46 @@ export component AppWindow inherits Window {
             }
 
             if root.settings-open: Card {
-                title: "Installation and launchers";
-                subtitle: root.installation-info;
-                Label { text: "INSTALLATION DIRECTORY"; }
-                LineEdit {
-                    text <=> root.install-directory;
-                    enabled: !root.installation-busy;
-                    edited => { root.install-collision = false; root.directory-changed(self.text); }
-                }
-                Text { text: "A copy named esquie will be installed here. The original file stays in place."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
-                Button {
-                    text: root.installation-busy ? "Working…" : "Install a copy";
-                    enabled: !root.installation-busy && root.can-copy;
-                    primary: true;
-                    clicked => { root.installation-requested(0); }
-                }
-                if root.install-collision: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: "Another file exists at " + root.collision-path + ". Replace it, or choose another directory above."; color: Theme.warn; wrap: word-wrap; }
-                    Button { text: "Replace existing installation"; enabled: !root.installation-busy; clicked => { root.installation-requested(1); } }
-                }
-                Button { text: "Add launcher without moving the app"; enabled: !root.installation-busy; clicked => { root.installation-requested(2); } }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Button { text: "Repair launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(3); } }
-                    Button { text: "Remove launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(4); } }
-                }
+                title: root.installation-ready ? "Esquie is installed" : "Installation and launchers";
+                subtitle: root.installation-ready ? "Installed at " + root.installed-path : root.installation-info;
                 if root.installation-message != "": Text { text: root.installation-message; color: Theme.text; wrap: word-wrap; }
                 if root.can-switch: VerticalLayout {
                     spacing: 8px;
                     Text { text: "Your current audio session is still running. Switching to the installed copy briefly interrupts the virtual microphone."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
-                    Button { text: "Switch to installed copy"; enabled: !root.installation-busy; clicked => { root.switch-installation(); } }
+                    Button { text: "Switch to installed copy"; primary: true; enabled: !root.installation-busy; clicked => { root.switch-installation(); } }
+                }
+                if root.installation-ready: Button {
+                    text: root.installation-options-open ? "Hide installation options" : "Manage installation";
+                    enabled: !root.installation-busy;
+                    clicked => { root.installation-options-open = !root.installation-options-open; }
+                }
+                if !root.installation-ready || root.installation-options-open: VerticalLayout {
+                    spacing: 14px;
+                    if root.installation-ready: Text { text: root.installation-info; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+                    Label { text: "INSTALLATION DIRECTORY"; }
+                    LineEdit {
+                        text <=> root.install-directory;
+                        enabled: !root.installation-busy;
+                        edited => { root.install-collision = false; root.directory-changed(self.text); }
+                    }
+                    Text { text: "A copy named esquie will be installed here. The original file stays in place."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+                    Button {
+                        text: root.installation-busy ? "Working…" : "Install a copy";
+                        enabled: !root.installation-busy && root.can-copy;
+                        primary: !root.installation-ready;
+                        clicked => { root.installation-requested(0); }
+                    }
+                    if root.install-collision: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "Another file exists at " + root.collision-path + ". Replace it, or choose another directory above."; color: Theme.warn; wrap: word-wrap; }
+                        Button { text: "Replace existing installation"; enabled: !root.installation-busy; clicked => { root.installation-requested(1); } }
+                    }
+                    Button { text: "Add launcher without moving the app"; enabled: !root.installation-busy; clicked => { root.installation-requested(2); } }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button { text: "Repair launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(3); } }
+                        Button { text: "Remove launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(4); } }
+                    }
                 }
             }
             if root.settings-open: Card {

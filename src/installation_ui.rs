@@ -172,6 +172,7 @@ fn finish(
         }
         Ok(Outcome::Complete { target, external }) => {
             ui.set_install_prompt(false);
+            ui.set_installation_options_open(false);
             let message = if action == 4 {
                 "Esquie-owned launchers removed. The executable and startup preference were kept."
                     .to_string()
@@ -238,6 +239,15 @@ fn operate(
 }
 
 fn refresh(ui: &AppWindow, settings: &Settings) {
+    ui.set_installed_path(
+        settings
+            .installed_path
+            .as_ref()
+            .filter(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into(),
+    );
     match Locations::get().and_then(|l| Inventory::current(&l, settings)) {
         Ok(inventory) => {
             let mut info = inventory.description();
@@ -258,6 +268,7 @@ fn refresh(ui: &AppWindow, settings: &Settings) {
         Err(e) => {
             ui.set_installation_info(format!("Could not inspect installation: {e}").into());
             ui.set_can_copy(false);
+            ui.set_can_switch(false);
         }
     }
 }
