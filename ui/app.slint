@@ -126,7 +126,7 @@ component Button inherits Rectangle {
             font-size: 13px;
             vertical-alignment: center;
             horizontal-alignment: center;
-            wrap: word-wrap; height: self.preferred-height;
+            wrap: word-wrap;
             accessible-role: none;
         }
     }
@@ -252,13 +252,16 @@ component HoldButton inherits Rectangle {
         padding: 12px;
         spacing: 8px;
         alignment: center;
-        Icon { icon: "headphones"; color: Theme.warn; width: 16px; height: 16px; }
+        VerticalLayout {
+            alignment: center;
+            Icon { icon: "headphones"; color: Theme.warn; width: 16px; height: 16px; }
+        }
         Text {
             text: root.held ? "Hearing original — release to return" : "Hold to hear original";
             color: Theme.text;
             font-size: 13px;
             font-weight: 600;
-            wrap: word-wrap; height: self.preferred-height;
+            wrap: word-wrap;
             vertical-alignment: center;
             accessible-role: none;
         }
