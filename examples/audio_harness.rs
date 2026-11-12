@@ -25,8 +25,26 @@ fn source(name: &str, signal: &str) -> anyhow::Result<()> {
         matches!(signal, "tone" | "noise" | "silence"),
         "unknown signal {signal:?}"
     );
-    let noise = signal == "noise";
-    let silence = signal == "silence";
+    // Test-only source control: no desktop input or physical capture.
+    let signal_mode = Arc::new(std::sync::atomic::AtomicUsize::new(match signal {
+        "noise" => 1,
+        "silence" => 2,
+        _ => 0,
+    }));
+    let control = signal_mode.clone();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            let mode = match line.trim() {
+                "tone" => 0,
+                "noise" => 1,
+                "silence" => 2,
+                "burst" => 3,
+                "pilot" => 4,
+                _ => continue,
+            };
+            control.store(mode, Ordering::Relaxed);
+        }
+    });
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
@@ -43,6 +61,8 @@ fn source(name: &str, signal: &str) -> anyhow::Result<()> {
     )?;
     let mut phase = 0.0_f32;
     let mut random = 1_u32;
+    let mut burst_left = 0;
+    let mut generated = 0_usize;
     let _listener = stream
         .add_local_listener_with_user_data(())
         .process(move |stream, _| {
@@ -61,18 +81,43 @@ fn source(name: &str, signal: &str) -> anyhow::Result<()> {
                 } else {
                     requested.min(available)
                 };
+                if signal_mode
+                    .compare_exchange(3, 4, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    burst_left = 4800; // known 100 ms onset at 1 kHz, then quiet pilot
+                    phase = 0.0;
+                    emit(json!({"burst_start_sample": generated, "length": burst_left}));
+                }
+                let mode = signal_mode.load(Ordering::Relaxed);
                 for sample in bytes.as_chunks_mut::<4>().0.iter_mut().take(frames) {
-                    let value = if silence {
+                    let burst = burst_left > 0;
+                    let value = if burst {
+                        burst_left -= 1;
+                        0.2 * phase.sin()
+                    } else if mode == 4 {
+                        // Keep the model advancing beyond the tone: exact
+                        // silence takes its fast path and hides the delayed tail.
+                        0.001 * phase.sin()
+                    } else if mode == 2 {
                         0.0
-                    } else if noise {
+                    } else if mode == 1 {
                         random = random.wrapping_mul(1664525).wrapping_add(1013904223);
                         0.2 * (random as f32 / u32::MAX as f32 * 2.0 - 1.0)
                     } else {
                         0.2 * phase.sin()
                     };
                     sample.copy_from_slice(&value.to_le_bytes());
-                    phase =
-                        (phase + std::f32::consts::TAU * 440.0 / 48000.0) % std::f32::consts::TAU;
+                    let frequency = if burst {
+                        1000.0
+                    } else if mode == 4 {
+                        7000.0
+                    } else {
+                        440.0
+                    };
+                    phase = (phase + std::f32::consts::TAU * frequency / 48000.0)
+                        % std::f32::consts::TAU;
+                    generated += 1;
                 }
                 size = frames * 4;
             }
@@ -151,6 +196,19 @@ fn main() -> anyhow::Result<()> {
             "monitor" => Some(Command::Monitor),
             "play_cleaned" => Some(Command::PlayCleaned(value["value"].as_bool().unwrap())),
             "stop" => Some(Command::Stop),
+            "monitor_original" => {
+                shared
+                    .monitor_original
+                    .store(value["value"].as_bool().unwrap(), Ordering::Relaxed);
+                None
+            }
+            "processing" => {
+                shared.set_atten_db(value["atten_db"].as_f64().unwrap() as f32);
+                shared
+                    .gate
+                    .store(value["gate"].as_bool().unwrap(), Ordering::Relaxed);
+                None
+            }
             "enabled" => {
                 shared
                     .enabled
@@ -160,7 +218,10 @@ fn main() -> anyhow::Result<()> {
             "snapshot" => {
                 let (input, output) = shared.take_levels();
                 let (mode, length, position) = shared.preview();
+                let (live_active, processed_hops, captured_samples) = shared.live_activity();
                 emit(json!({"snapshot": {"input": input, "output": output,
+                    "live_active": live_active, "processed_hops": processed_hops,
+                    "captured_samples": captured_samples,
                     "mode": format!("{mode:?}"), "length": length, "position": position}}));
                 None
             }

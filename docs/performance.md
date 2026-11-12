@@ -32,9 +32,12 @@ observation. A long run keeps synthetic filtering active and may take hours.
 
 The audio states cover disconnection, no microphone, enabled and bypassed audio
 with and without a consumer, recording, cleaned playback, monitoring, and return
-from preview. Playback runs a second filtering chain concurrently with the live
-microphone. Recording and playback windows are six seconds because clips stop
-at ten seconds. `--signal tone` (the default) generates 440 Hz audio; `noise`
+from preview. The live model stays loaded but sleeps when no virtual-microphone
+route, recording, or live monitoring needs it. Capture and the raw input meter keep
+running. The output meter clears while live processing sleeps; opening the
+sound check alone does not wake it. Recorded playback uses a separate filtering
+chain and does not wake the live model. Recording and playback windows are six
+seconds because clips stop at ten seconds. `--signal tone` (the default) generates 440 Hz audio; `noise`
 generates deterministic white noise; `silence` generates zeros. These signals
 exercise different model branches; none establishes speech quality or a worst
 case for speech processing. Compare the same signal, rates, and quantum between
@@ -99,3 +102,21 @@ library residency and host load can change PSS and CPU between runs. A completed
 short soak can reveal growth, but cannot establish the absence of a long-term
 leak or prove battery use. Check `status.json` and the command exit status before
 treating a run as complete; partial samples from failed runs remain for diagnosis.
+
+Live resume keeps at most 40 ms of recent raw capture to cover consumer link
+notification timing. Older idle audio and the previous output queue are dropped.
+Model audio look-ahead, FFT overlap, high-pass and gate state are drained on
+suspension; learned recurrent estimates remain allocated. Resuming does not
+rebuild the model. The pre-roll adds up to 40 ms of audio ahead of new capture,
+in addition to model look-ahead and the output cushion. Synthetic onset checks
+in the isolated integration suite measure this tradeoff; they do not establish
+real first-word retention or perceptual quality.
+
+Harness snapshots expose `live_active`, `processed_hops`, and `captured_samples`.
+Use increasing capture with unchanged processed-hop counts to verify inference
+suspension independently of the signal or display-name list. `live_active`
+indicates demand; bypass can be active without running model hops. Routed links
+(including routing nodes) keep processing active. Registry enumeration and source
+identification must complete before absence of links permits suspension; stream
+activity alone can reflect graph scheduling without consumers. Links with missing
+endpoints are also treated as uncertain demand.

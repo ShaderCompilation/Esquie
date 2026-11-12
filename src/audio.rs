@@ -31,6 +31,8 @@ use tracing::{debug, error, info, info_span, warn};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const VIRTUAL_NODE_NAME: &str = "esquie";
+// Keep only the last 40 ms of raw capture while live processing sleeps.
+const PRE_ROLL_HOPS: usize = 4;
 const MAX_QUEUE: usize = SAMPLE_RATE as usize / 5; // 200 ms: beyond this we drop old audio
 pub const MAX_CLIP_SECS: u32 = 10;
 const MAX_CLIP: usize = (SAMPLE_RATE * MAX_CLIP_SECS) as usize;
@@ -63,6 +65,9 @@ pub struct Shared {
     preview_mode: AtomicU8,
     clip_len: AtomicUsize,
     play_pos: AtomicUsize,
+    live_active: AtomicBool,
+    processed_hops: AtomicUsize,
+    captured_samples: AtomicUsize,
 }
 
 impl Shared {
@@ -79,6 +84,9 @@ impl Shared {
             preview_mode: AtomicU8::new(PreviewMode::Idle as u8),
             clip_len: AtomicUsize::new(0),
             play_pos: AtomicUsize::new(0),
+            live_active: AtomicBool::new(false),
+            processed_hops: AtomicUsize::new(0),
+            captured_samples: AtomicUsize::new(0),
         }
     }
     /// Current test mode, recorded clip length and playback position (seconds).
@@ -107,6 +115,15 @@ impl Shared {
         (
             f32::from_bits(self.in_level.swap(0, Ordering::Relaxed)),
             f32::from_bits(self.out_level.swap(0, Ordering::Relaxed)),
+        )
+    }
+    /// Live demand, processed model hops, and captured samples. Counters let
+    /// diagnostics distinguish suspended inference from captured silence.
+    pub fn live_activity(&self) -> (bool, usize, usize) {
+        (
+            self.live_active.load(Ordering::Relaxed),
+            self.processed_hops.load(Ordering::Relaxed),
+            self.captured_samples.load(Ordering::Relaxed),
         )
     }
     fn bump(level: &AtomicU32, samples: &[f32]) {
@@ -251,16 +268,47 @@ impl Cleaner {
         self.gate.reset();
     }
 
-    /// Forget all audio history, including the model's look-ahead, so nothing
-    /// from a previous input or connection leaks into new output.
+    /// Drain audio history without rebuilding the model. The pinned model
+    /// skips silent input, and its `init` neither resets recurrent state nor
+    /// clears the noisy spectral queue. Advance it with non-silent input but a
+    /// zero analysis window, so only zero spectra enter its look-ahead buffers.
+    /// Recurrent estimates survive; queued audio, FFT overlap, normalization,
+    /// high-pass and gate state do not.
     fn flush(&mut self) {
-        const FRAMES: usize = 8; // more than the model's look-ahead and DF order
-        let hop = self.buf.len();
-        let silence = vec![0.0; hop];
-        let mut out = vec![0.0; hop];
-        for _ in 0..FRAMES {
-            self.process(&silence, &mut out);
+        let windows: Vec<_> = self
+            .df
+            .df_states
+            .iter_mut()
+            .map(|state| {
+                let window = state.window.clone();
+                state.window.fill(0.0);
+                state.reset();
+                window
+            })
+            .collect();
+        let frames = self.df.df_order
+            + self.df.lookahead
+            + self.df.conv_lookahead
+            + self.df.fft_size / self.df.hop_size
+            + 1;
+        let input = vec![0.001; self.buf.len()]; // above the silence fast path
+        let mut out = vec![0.0; self.buf.len()];
+        // Zero attenuation returns before advancing the model's queues.
+        let attenuation = self.df.atten_lim.take();
+        for _ in 0..frames {
+            let noisy = ArrayView2::from_shape((1, input.len()), &input).unwrap();
+            let enh = ArrayViewMut2::from_shape((1, out.len()), &mut out).unwrap();
+            if let Err(error) = self.df.process(noisy, enh) {
+                warn!("Could not drain model history: {error:#}");
+            }
         }
+        self.df.atten_lim = attenuation;
+        for (state, window) in self.df.df_states.iter_mut().zip(windows) {
+            state.window = window;
+            state.reset();
+            state.init_norm_states(self.df.nb_df);
+        }
+        self.buf.fill(0.0);
         self.reset();
     }
 }
@@ -269,6 +317,9 @@ struct Engine {
     cleaner: Cleaner,
     hop: usize,
     was_enabled: bool,
+    routed: bool,
+    live_active: bool,
+    pre_roll: VecDeque<f32>,
     input: Vec<f32>,
     frame_out: Vec<f32>,
     queue: VecDeque<f32>,
@@ -379,6 +430,9 @@ impl Engine {
             cleaner,
             hop,
             was_enabled: true,
+            routed: true, // unknown until the first registry/stream events
+            live_active: false,
+            pre_roll: VecDeque::with_capacity(hop * PRE_ROLL_HOPS),
             input: Vec::with_capacity(hop * 8),
             frame_out: vec![0.0; hop],
             queue: VecDeque::with_capacity(MAX_QUEUE * 2),
@@ -388,9 +442,68 @@ impl Engine {
         })
     }
 
+    /// One authoritative predicate, independent of display names and playback.
+    fn needs_live(&self) -> bool {
+        self.routed
+            || matches!(
+                self.preview.mode,
+                PreviewMode::Recording | PreviewMode::Monitoring
+            )
+    }
+
+    fn discard_output(&mut self) {
+        self.queue.clear();
+        self.primed = false;
+    }
+
+    fn set_routed(&mut self, routed: bool) {
+        if self.routed != routed {
+            self.routed = routed;
+            // A new reader must never receive a previous reader's backlog,
+            // even when recording/monitoring kept live inference running.
+            self.discard_output();
+        }
+        self.update_live();
+    }
+
+    fn update_live(&mut self) {
+        let active = self.needs_live();
+        if self.live_active == active {
+            return;
+        }
+        self.live_active = active;
+        self.shared.live_active.store(active, Ordering::Relaxed);
+        self.input.clear();
+        self.queue.clear();
+        self.primed = false;
+        self.preview.queue.clear();
+        self.preview.primed = false;
+        self.shared.out_level.store(0, Ordering::Relaxed);
+        if active {
+            // Process the bounded recent capture on the next capture callback.
+            self.input.extend(self.pre_roll.drain(..));
+        } else {
+            self.pre_roll.clear();
+            self.cleaner.flush();
+        }
+        debug!(active, "live processing demand changed");
+    }
+
     /// Feed captured mic samples; processed audio lands in `queue`.
     fn push_input(&mut self, samples: &[f32]) {
         Shared::bump(&self.shared.in_level, samples);
+        self.shared
+            .captured_samples
+            .fetch_add(samples.len(), Ordering::Relaxed);
+        self.update_live();
+        if !self.live_active {
+            let limit = self.hop * PRE_ROLL_HOPS;
+            let samples = &samples[samples.len().saturating_sub(limit)..];
+            let excess = (self.pre_roll.len() + samples.len()).saturating_sub(limit);
+            self.pre_roll.drain(..excess);
+            self.pre_roll.extend(samples.iter().copied());
+            return;
+        }
         self.input.extend_from_slice(samples);
 
         let p = &mut self.preview;
@@ -405,15 +518,17 @@ impl Engine {
         self.cleaner.sync(&self.shared);
         let enabled = self.shared.enabled.load(Ordering::Relaxed);
         if enabled && !self.was_enabled {
-            self.cleaner.reset();
+            self.cleaner.flush();
         }
         self.was_enabled = enabled;
 
+        let mut processed = 0;
         let mut start = 0;
         while self.input.len() - start >= self.hop {
             let frame = &self.input[start..start + self.hop];
             if enabled {
                 self.cleaner.process(frame, &mut self.frame_out);
+                processed += 1;
             } else {
                 self.frame_out.copy_from_slice(frame);
             }
@@ -429,6 +544,9 @@ impl Engine {
             }
             start += self.hop;
         }
+        self.shared
+            .processed_hops
+            .fetch_add(processed, Ordering::Relaxed);
         self.input.drain(..start);
         if self.preview.queue.len() > MAX_QUEUE {
             let excess = self.preview.queue.len() - self.hop * 4;
@@ -455,6 +573,7 @@ impl Engine {
     /// disconnect or input change. Keeps a finished recording for playback.
     fn clear_audio(&mut self) {
         self.input.clear();
+        self.pre_roll.clear();
         self.queue.clear();
         self.primed = false;
         self.cleaner.flush();
@@ -466,6 +585,7 @@ impl Engine {
         }
         self.shared.play_pos.store(0, Ordering::Relaxed);
         self.preview.set_mode(PreviewMode::Idle, &self.shared);
+        self.update_live();
     }
 
     fn start_recording(&mut self) {
@@ -473,6 +593,7 @@ impl Engine {
         self.shared.clip_len.store(0, Ordering::Relaxed);
         self.shared.play_pos.store(0, Ordering::Relaxed);
         self.preview.set_mode(PreviewMode::Recording, &self.shared);
+        self.update_live();
     }
 
     fn prepare_playback_cleaner(&mut self) -> Result<()> {
@@ -495,6 +616,7 @@ impl Engine {
         self.preview.pos = 0;
         self.shared.play_pos.store(0, Ordering::Relaxed);
         self.preview.set_mode(PreviewMode::Playing, &self.shared);
+        self.update_live();
         Ok(true)
     }
 }
@@ -652,11 +774,36 @@ struct Conn {
     virtual_id: Cell<Option<u32>>,
     /// Recording streams (apps) by node id, with a display name.
     apps: RefCell<HashMap<u32, String>>,
-    /// Links from our virtual mic: link id -> input node id.
-    links: RefCell<HashMap<u32, u32>>,
+    /// All links, including those enumerated before our node: id -> (out, in).
+    /// Missing endpoints are uncertain demand until the link disappears.
+    links: RefCell<HashMap<u32, Option<(u32, u32)>>>,
+}
+
+/// All links leaving our source are demand, including unnamed routing nodes.
+/// Until registry enumeration identifies our source, keep processing. Stream
+/// Streaming alone is not demand: PipeWire can schedule an unlinked source
+/// after capture or graph changes, even without a shared node group.
+fn live_routed(
+    synced: bool,
+    source: Option<u32>,
+    links: &HashMap<u32, Option<(u32, u32)>>,
+) -> bool {
+    !synced
+        || source.is_none()
+        || links
+            .values()
+            .any(|link| link.is_none_or(|(out, _)| Some(out) == source))
 }
 
 impl Conn {
+    fn live_routed(&self) -> bool {
+        live_routed(
+            self.synced.get(),
+            self.virtual_id.get(),
+            &self.links.borrow(),
+        )
+    }
+
     fn new(core: pw::core::CoreRc) -> Rc<Self> {
         Rc::new_cyclic(|weak| Self {
             weak: weak.clone(),
@@ -843,6 +990,7 @@ impl App {
         }
         self.server_error.replace(Some(reason));
         self.capture_retry.borrow_mut().reset();
+        self.engine.borrow_mut().set_routed(false);
         self.engine.borrow_mut().clear_audio();
         (self.notify)(Event::Mics {
             list: Vec::new(),
@@ -868,6 +1016,7 @@ impl App {
         if let Some(conn) = self.current() {
             self.check_capture(&conn, now);
             self.check_preview(&conn);
+            self.engine.borrow_mut().set_routed(conn.live_routed());
         }
         self.update_status(now);
     }
@@ -960,21 +1109,31 @@ impl App {
         registry: &pw::registry::RegistryRc,
         obj: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
     ) {
+        if obj.type_ == pw::types::ObjectType::Link {
+            let node = |key| obj.props?.get(key)?.parse::<u32>().ok();
+            let endpoints = node("link.output.node").zip(node("link.input.node"));
+            if let Some((out, _)) = endpoints
+                && Some(out) == conn.virtual_id.get()
+                && !conn
+                    .links
+                    .borrow()
+                    .values()
+                    .flatten()
+                    .any(|(n, _)| *n == out)
+            {
+                // Even if detach/reattach coalesce into one dispatch, the
+                // first new reader cannot inherit a preview's backlog.
+                self.engine.borrow_mut().discard_output();
+            }
+            conn.links.borrow_mut().insert(obj.id, endpoints);
+            self.send_users(conn);
+            return;
+        }
         let Some(props) = obj.props else { return };
         if obj.type_ == pw::types::ObjectType::Metadata
             && props.get("metadata.name") == Some("default")
         {
             self.bind_metadata(conn, registry, obj);
-            return;
-        }
-        if obj.type_ == pw::types::ObjectType::Link {
-            let node = |k| props.get(k).and_then(|v| v.parse::<u32>().ok());
-            if let (Some(out), Some(input)) = (node("link.output.node"), node("link.input.node"))
-                && Some(out) == conn.virtual_id.get()
-            {
-                conn.links.borrow_mut().insert(obj.id, input);
-                self.send_users(conn);
-            }
             return;
         }
         if obj.type_ != pw::types::ObjectType::Node {
@@ -998,6 +1157,7 @@ impl App {
         };
         if name == VIRTUAL_NODE_NAME {
             conn.virtual_id.set(Some(obj.id));
+            self.send_users(conn);
             return;
         }
         let description = props
@@ -1074,7 +1234,6 @@ impl App {
         }
         if conn.virtual_id.get() == Some(id) {
             conn.virtual_id.set(None);
-            conn.links.borrow_mut().clear();
             self.send_users(conn);
             return;
         }
@@ -1135,7 +1294,9 @@ impl App {
             conn.links
                 .borrow()
                 .values()
-                .filter_map(|n| apps.get(n).cloned())
+                .flatten()
+                .filter(|(out, _)| Some(*out) == conn.virtual_id.get())
+                .filter_map(|(_, input)| apps.get(input).cloned())
                 .collect()
         };
         self.set_users(users);
@@ -1241,10 +1402,13 @@ impl App {
         )?;
         let engine = self.engine.clone();
         let app = Rc::downgrade(self);
+        let source_engine = self.engine.clone();
         let listener = stream
             .add_local_listener_with_user_data(())
             .state_changed(move |_, _, _old, new| {
-                // Paused just means no app is reading the virtual mic.
+                if matches!(new, StreamState::Paused) {
+                    source_engine.borrow_mut().discard_output();
+                }
                 if let (StreamState::Error(msg), Some(app)) = (new, app.upgrade()) {
                     let mut lost = app.lost.borrow_mut();
                     if lost.is_none() {
@@ -1473,6 +1637,7 @@ impl App {
             preview, shared, ..
         } = &mut *e;
         preview.set_mode(PreviewMode::Idle, shared);
+        e.update_live();
     }
 
     /// The test section needs a connection and a microphone.
@@ -1541,6 +1706,7 @@ impl App {
                 preview, shared, ..
             } = &mut *e;
             preview.set_mode(PreviewMode::Monitoring, shared);
+            e.update_live();
         }
         if !self.ensure_preview_stream(&conn) {
             self.stop_preview();
@@ -1680,6 +1846,168 @@ mod tests {
             out.extend(engine.queue.drain(..));
         }
         rms_db(&out[SAMPLE_RATE as usize..])
+    }
+
+    #[test]
+    fn routing_demand_is_conservative_and_independent_of_app_names() {
+        let mut links = HashMap::new();
+        assert!(live_routed(false, Some(9), &links));
+        assert!(live_routed(true, None, &links));
+        assert!(!live_routed(true, Some(9), &links));
+        // Links can arrive before nodes, and routing nodes need no app name.
+        links.insert(1, Some((9, 20)));
+        links.insert(2, Some((9, 21)));
+        links.insert(3, Some((8, 22)));
+        assert!(live_routed(true, Some(9), &links));
+        links.remove(&1);
+        assert!(live_routed(true, Some(9), &links));
+        links.remove(&2);
+        assert!(!live_routed(true, Some(9), &links));
+        assert!(!live_routed(true, Some(10), &links));
+        links.insert(4, None);
+        assert!(
+            live_routed(true, Some(10), &links),
+            "unknown link endpoints keep inference awake"
+        );
+    }
+
+    #[test]
+    fn idle_capture_is_bounded_and_resumes_only_recent_audio() {
+        let shared = Arc::new(Shared::new(false, 100.0, false, false));
+        let mut engine = Engine::new(shared.clone()).unwrap();
+        engine.push_input(&vec![0.9; engine.hop + 7]);
+        assert!(!engine.queue.is_empty());
+        assert!(!engine.input.is_empty());
+        engine.set_routed(false);
+        let baseline = shared.live_activity();
+        for _ in 0..100 {
+            engine.push_input(&vec![0.7; engine.hop]);
+        }
+        // A large callback must also retain only the most recent 40 ms.
+        engine.push_input(&vec![0.2; engine.hop * 20 + 1]);
+        assert_eq!(engine.pre_roll.len(), engine.hop * PRE_ROLL_HOPS);
+        assert!(engine.input.is_empty() && engine.queue.is_empty());
+        assert_eq!(shared.live_activity().1, baseline.1);
+        assert!(shared.live_activity().2 > baseline.2);
+        assert_eq!(shared.take_levels(), (0.9, 0.0));
+        let mut out = vec![1.0; engine.hop];
+        engine.pull_output(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0));
+
+        engine.set_routed(true);
+        engine.push_input(&vec![0.3; engine.hop]);
+        assert_eq!(engine.queue.len(), engine.hop * (PRE_ROLL_HOPS + 1));
+        assert!(
+            engine
+                .queue
+                .iter()
+                .take(engine.hop * PRE_ROLL_HOPS)
+                .all(|&x| x == 0.2)
+        );
+        assert!(
+            engine
+                .queue
+                .iter()
+                .skip(engine.hop * PRE_ROLL_HOPS)
+                .all(|&x| x == 0.3)
+        );
+        assert!(engine.pre_roll.is_empty());
+        engine.set_routed(false);
+        shared.enabled.store(true, Ordering::Relaxed);
+        engine.push_input(&vec![0.1; engine.hop]);
+        assert_eq!(
+            shared.live_activity().1,
+            baseline.1,
+            "settings do not wake idle inference"
+        );
+    }
+
+    #[test]
+    fn consumer_joining_a_preview_drops_old_output_without_stopping_live_audio() {
+        let shared = Arc::new(Shared::new(false, 100.0, false, false));
+        let mut engine = Engine::new(shared.clone()).unwrap();
+        engine.set_routed(false);
+        engine.preview.set_mode(PreviewMode::Monitoring, &shared);
+        engine.push_input(&vec![0.2; engine.hop * 10]);
+        assert!(!engine.queue.is_empty());
+        let preview = engine.preview.queue.clone();
+        engine.set_routed(true);
+        assert!(engine.queue.is_empty());
+        assert_eq!(engine.preview.queue, preview);
+        assert!(engine.live_active);
+        engine.push_input(&vec![0.3; engine.hop]);
+        assert!(engine.queue.iter().all(|&x| x == 0.3));
+        engine.set_routed(false);
+        assert!(engine.queue.is_empty());
+        assert!(engine.live_active, "monitoring still needs live audio");
+    }
+
+    #[test]
+    fn previews_supply_live_demand_but_playback_does_not() {
+        let shared = Arc::new(Shared::new(true, 100.0, true, true));
+        let mut engine = Engine::new(shared.clone()).unwrap();
+        engine.set_routed(false);
+        engine.push_input(&vec![0.1; engine.hop]);
+        assert_eq!(shared.live_activity().1, 0);
+        engine.start_recording();
+        engine.push_input(&vec![0.1; MIN_CLIP]);
+        assert!(shared.live_activity().0 && shared.live_activity().1 > 0);
+        assert!(engine.start_playing().unwrap());
+        let hops = shared.live_activity().1;
+        engine.push_input(&vec![0.1; engine.hop]);
+        assert!(!shared.live_activity().0);
+        let mut out = vec![0.0; engine.hop];
+        engine.preview.fill(&mut out, &shared, engine.hop);
+        assert!(engine.preview.pos > 0);
+        assert_eq!(shared.live_activity().1, hops);
+        for original in [true, false] {
+            engine.preview.set_mode(PreviewMode::Monitoring, &shared);
+            shared.monitor_original.store(original, Ordering::Relaxed);
+            engine.push_input(&vec![0.1; engine.hop]);
+            assert!(shared.live_activity().0 && shared.live_activity().1 > hops);
+            assert!(!engine.preview.queue.is_empty());
+        }
+        engine.preview.set_mode(PreviewMode::Idle, &shared);
+        engine.update_live();
+        assert!(!shared.live_activity().0);
+        assert!(engine.preview.queue.is_empty());
+    }
+
+    #[test]
+    fn flushing_model_discards_lookahead_even_after_zero_attenuation() {
+        for db in [0.0, 6.0, 100.0] {
+            let shared = Shared::new(true, db, false, false);
+            let mut cleaner = Cleaner::new(&shared).unwrap();
+            let hop = cleaner.buf.len();
+            let mut out = vec![0.0; hop];
+            let loud: Vec<_> = (0..hop).map(|i| 0.5 * (i as f32 * 0.2).sin()).collect();
+            // Above the model's silence fast path, so look-ahead would expose
+            // the previous loud signal if the flush merely processed zeros.
+            let quiet: Vec<_> = (0..hop)
+                .map(|i| if i % 2 == 0 { 0.001 } else { -0.001 })
+                .collect();
+            let model_buffer = cleaner.buf.as_ptr();
+            for _ in 0..5 {
+                for _ in 0..20 {
+                    cleaner.process(&loud, &mut out);
+                }
+                cleaner.flush();
+                cleaner.process(&quiet, &mut out);
+                if db > 0.0 {
+                    assert!(
+                        out.iter().all(|s| s.abs() < 1e-5),
+                        "old model audio survived: {db} dB, peak {}",
+                        out.iter().copied().fold(0.0_f32, |p, x| p.max(x.abs()))
+                    );
+                }
+                assert_eq!(
+                    cleaner.buf.as_ptr(),
+                    model_buffer,
+                    "live cleaner is retained"
+                );
+                assert!(cleaner.df.df_states[0].window.iter().any(|&w| w > 0.0));
+            }
+        }
     }
 
     #[test]

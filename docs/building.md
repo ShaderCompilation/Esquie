@@ -165,8 +165,16 @@ known tone from fixed-format harness source processes, and records two native
 consumers. Session-manager tests recreate those sources to model hardware
 monitor device re-enumeration. It tests recovery, preference
 restoration, metadata replacement, error persistence, preview separation,
-recording/meter cleanup, and retry cancellation. It verifies actual graph
-rates/quanta using `pw-top` and finite output with the cleaning engine enabled.
+recording/meter cleanup, and retry cancellation. Demand checks verify that
+capture continues while model-hop counts stop, that same-name consumers and
+non-application routes wake processing, and that preview and recovery transitions
+release or retain demand correctly. Repeated attachment trials require first
+observed output within 200 ms, at least 90 ms of a 100 ms synthetic onset, and
+old-tone correlation below 0.005 amplitude. They use 6 dB attenuation with the
+gate disabled and a quiet pilot to advance the model after the burst; this is
+synthetic timing/queue coverage, not speech-quality or first-word validation.
+The suite verifies actual graph rates/quanta using `pw-top` and finite output
+with the cleaning engine enabled.
 Graph recovery waits are limited to ten seconds and Quit to one second. The
 recording-limit scenario allows twelve seconds to capture a full ten-second
 sample and checks that playback starts only after an explicit Play command.

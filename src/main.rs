@@ -325,9 +325,14 @@ fn main() -> anyhow::Result<()> {
         ui.on_refresh_preview(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             let (i, o) = shared.take_levels();
+            let (live_active, ..) = shared.live_activity();
             if ui.get_meters_active() {
                 ui.set_in_level(to_meter(i).max(ui.get_in_level() * 0.85));
-                ui.set_out_level(to_meter(o).max(ui.get_out_level() * 0.85));
+                ui.set_out_level(if live_active {
+                    to_meter(o).max(ui.get_out_level() * 0.85)
+                } else {
+                    0.0
+                });
             } else {
                 ui.set_in_level(0.0);
                 ui.set_out_level(0.0);

@@ -224,7 +224,7 @@ wireplumber.profiles = { main = {
         self.ready("mic_b")
 
     def mic(self, name):
-        child = self.spawn(name, [str(self.harness), "--source", name])
+        child = self.spawn(name, [str(self.harness), "--source", name], stdin=subprocess.PIPE)
         self.wait(lambda: name in self.state.get("mics", []), f"discover {name}")
         assert "esquie" not in self.state["mics"], "virtual mic offered as an input"
         return child
@@ -257,14 +257,173 @@ wireplumber.profiles = { main = {
                         return (json.loads(value) if isinstance(value, str) else value).get("name")
         return None
 
-    def capture(self, name):
+    def capture(self, name, app_name=None):
         path = self.out / f"{name}.f32"
         stream = path.open("wb")
         self.files.append(stream)
         child = self.spawn(name, ["pw-cat", "--record", *self.raw_option, "--rate", "48000",
                                   "--channels", "1", "--format", "f32", "--target", "esquie",
-                                  "--properties", f"application.name={name}", "-"], stdout=stream)
+                                  "--properties", f"application.name={app_name or name}", "-"], stdout=stream)
         return child, path
+
+    def live(self, active):
+        self.wait(lambda: self.snapshot()["live_active"] == active,
+                  f"live demand becomes {active}")
+        before = self.snapshot()
+        time.sleep(0.15)
+        after = self.snapshot()
+        assert after["captured_samples"] > before["captured_samples"], "capture stopped"
+        if active:
+            assert after["processed_hops"] > before["processed_hops"], "inference did not run"
+        else:
+            assert after["processed_hops"] == before["processed_hops"], "idle inference still runs"
+            assert after["output"] == 0, "stale output meter while asleep"
+        return after
+
+    def demand_scenarios(self):
+        self.check("idle source stays available and captures without inference", lambda: (
+            self.live(False), self.ready("mic_b"),
+            self.wait(lambda: any(o.get("info", {}).get("props", {}).get("node.name") == "esquie"
+                                 for o in self.graph()), "idle source discoverable")))
+
+        def rapid_consumers():
+            for i in range(3):
+                # Identical display names must not merge demand lifetimes.
+                first, _ = self.capture(f"same-name-a-{i}", app_name="same-name")
+                second, _ = self.capture(f"same-name-b-{i}", app_name="same-name")
+                self.live(True)
+                self.stop(first)
+                self.live(True)
+                self.stop(second)
+                self.live(False)
+        self.check("rapid attachment and two same-name consumers preserve demand", rapid_consumers)
+
+        def routing():
+            self.run("pw-cli", "create-node", "adapter",
+                     "{ factory.name=support.null-audio-sink node.name=demand-router "
+                     "media.class=Audio/Sink audio.position=[ MONO ] object.linger=true }")
+            self.wait(lambda: any(o.get("info", {}).get("props", {}).get("node.name") == "demand-router"
+                                 for o in self.graph()), "routing sink")
+            self.run("pw-link", "esquie:capture_MONO", "demand-router:playback_MONO")
+            self.live(True)
+            assert not self.state.get("users"), "routing node unexpectedly counted as an app"
+            self.run("pw-link", "-d", "esquie:capture_MONO", "demand-router:playback_MONO")
+            self.live(False)
+            router = next(o["id"] for o in self.graph()
+                          if o.get("info", {}).get("props", {}).get("node.name") == "demand-router")
+            self.run("pw-cli", "destroy", str(router))
+        self.check("non-application routing wakes inference", routing)
+
+        def switches():
+            consumer, _ = self.capture("switch-consumer")
+            self.live(True)
+            self.command("select", name="mic_a")
+            self.ready("mic_a")
+            self.live(True)
+            self.command("enabled", value=False)
+            self.wait(lambda: self.snapshot()["live_active"], "bypassed consumer stays active")
+            time.sleep(0.1)
+            before = self.snapshot()
+            time.sleep(0.15)
+            after = self.snapshot()
+            assert after["processed_hops"] == before["processed_hops"], "bypass ran inference"
+            assert after["captured_samples"] > before["captured_samples"]
+            self.command("enabled", value=True)
+            self.live(True)
+            self.stop(consumer)
+            self.live(False)
+            self.command("enabled", value=False)
+            self.live(False)
+            self.command("enabled", value=True)
+            self.live(False)
+            self.command("record")
+            self.live(True)
+            self.command("select", name="mic_b")
+            self.ready("mic_b")
+            snapshot = self.live(False)
+            assert snapshot["mode"] == "Idle" and snapshot["length"] == 0, snapshot
+        self.check("microphone and bypass switches preserve active and suspended demand", switches)
+
+        def preview_demand():
+            self.command("record")
+            self.live(True)
+            self.wait(lambda: self.snapshot()["length"] >= 0.6, "short recording")
+            self.command("stop")
+            self.live(False)
+            # Missing speaker route is handled independently of microphone readiness.
+            self.command("monitor")
+            self.wait(lambda: self.state.get("preview_error") is not None, "failed monitor")
+            self.live(False)
+            self.ready("mic_b")
+        self.check("recording wakes inference and failed monitoring releases it", preview_demand)
+
+    def onset_scenarios(self):
+        # Acceptance budgets chosen before measuring: first observed nonzero
+        # output within 200 ms of launching a consumer; retain >=90 ms of a
+        # 100 ms onset; old 440 Hz audio must stay below 0.005 amplitude.
+        # A quiet 7 kHz pilot keeps model look-ahead advancing after the burst;
+        # exact silence would skip model processing and truncate its tail.
+        evidence = []
+        for enabled in (False, True):
+            self.command("enabled", value=enabled)
+            # A bounded attenuation floor makes a synthetic tone measurable;
+            # it is not a speech-quality test of the default model settings.
+            self.command("processing", atten_db=6, gate=False)
+            for repeat in range(3):
+                self.mic_b.stdin.write("tone\n")
+                self.mic_b.stdin.flush()
+                warm, _ = self.capture("onset-warm")
+                self.wait(lambda: "onset-warm" in self.state.get("users", []), "warm consumer")
+                time.sleep(0.1)
+                self.stop(warm)
+                self.wait(lambda: not self.snapshot()["live_active"], "suspended before onset")
+                self.mic_b.stdin.write("pilot\n")
+                self.mic_b.stdin.flush()
+                time.sleep(0.15)  # old tone is older than the 40 ms pre-roll
+                start = time.monotonic()
+                consumer, path = self.capture(f"onset-{enabled}-{repeat}")
+                self.mic_b.stdin.write("burst\n")
+                self.mic_b.stdin.flush()
+                first_output = None
+                while time.monotonic() - start < 0.2:
+                    self.pump()
+                    samples = array.array("f")
+                    data = path.read_bytes()
+                    samples.frombytes(data[:len(data) // 4 * 4])
+                    if any(abs(x) > 0.02 for x in samples):
+                        first_output = time.monotonic() - start
+                        break
+                    time.sleep(0.002)
+                assert first_output is not None, "no onset output within 200 ms"
+                time.sleep(0.25)
+                self.stop(consumer)
+                samples = array.array("f")
+                samples.frombytes(path.read_bytes())
+                assert samples and all(math.isfinite(x) for x in samples)
+                # Sliding 5 ms RMS windows locate the burst, allowing for
+                # normal sine zero crossings and filter phase.
+                step = 240
+                blocks = [samples[i:i + step] for i in range(0, len(samples) - step + 1, step)]
+                audible = [i for i, block in enumerate(blocks)
+                           if math.sqrt(sum(x*x for x in block) / step) > 0.025]
+                assert audible, "onset signal missing"
+                duration = (audible[-1] - audible[0] + 1) * 0.005
+                assert 0.09 <= duration <= 0.14, f"clipped or stretched onset: {duration}s"
+                # Correlation detects stale old tone separately from the new onset.
+                peak_old = max((2 * math.hypot(
+                    sum(x * math.sin(2*math.pi*440*j/48000) for j, x in enumerate(block)),
+                    sum(x * math.cos(2*math.pi*440*j/48000) for j, x in enumerate(block))) / len(block)
+                    for block in (samples[i:i+2400] for i in range(0, len(samples)-2399, 2400))), default=0)
+                assert peak_old < 0.005, f"stale old tone: {peak_old}"
+                evidence.append({"enabled": enabled, "repeat": repeat,
+                                 "attach_to_observed_output_ms": first_output * 1000,
+                                 "onset_ms": duration * 1000, "old_tone_amplitude": peak_old})
+                self.wait(lambda: not self.snapshot()["live_active"], "suspended after onset")
+                (self.out / "resume-onsets.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        self.command("enabled", value=True)
+        self.command("processing", atten_db=100, gate=True)
+        self.mic_b.stdin.write("tone\n")
+        self.mic_b.stdin.flush()
 
     def exercise(self):
         self.start_engine()
@@ -292,6 +451,8 @@ wireplumber.profiles = { main = {
         self.check("Esquie as default never captures itself", lambda: (
             self.set_default("esquie"), self.stable(lambda: self.state.get("active") == "mic_b")))
 
+        self.demand_scenarios()
+
         def missing_route():
             self.stop(self.manager)
             for link in self.capture_links("mic_b"):
@@ -301,9 +462,12 @@ wireplumber.profiles = { main = {
             self.stable(lambda: self.state.get("status", "").startswith("NoRoute"))
             self.stop(unrelated)
             self.restore_devices()
+            self.live(False)
         self.check("microphone discovery preserves missing-route errors", missing_route)
 
         def restart_manager():
+            consumer, _ = self.capture("manager-restart-consumer")
+            self.live(True)
             old = self.metadata_id()
             self.stop(self.manager)
             self.wait(lambda: self.metadata_id() is None, "metadata removed")
@@ -317,6 +481,15 @@ wireplumber.profiles = { main = {
             self.ready("mic_a")
             self.mic_b = self.mic("mic_b")
             self.ready("mic_b")
+            # The manager may not reconnect a surviving pw-cat after the
+            # virtual node is re-enumerated. Model the caller retry explicitly;
+            # an unlinked surviving stream is not demand.
+            self.stop(consumer)
+            self.live(False)
+            consumer, _ = self.capture("manager-reconnected-consumer")
+            self.live(True)
+            self.stop(consumer)
+            self.live(False)
         self.check("WirePlumber restart and metadata replacement recover", restart_manager)
 
         def restart_server():
@@ -328,8 +501,9 @@ wireplumber.profiles = { main = {
             self.stop(self.server)
             self.wait(lambda: self.state.get("status", "").startswith("Disconnected"), "server loss")
             assert self.state.get("mics") == [] and self.state.get("users") == [], self.state
-            assert self.snapshot() == {"input": 0.0, "output": 0.0, "mode": "Idle",
-                                       "length": 0.0, "position": 0.0}
+            snapshot = self.snapshot()
+            assert all(snapshot[k] == v for k, v in {"input": 0.0, "output": 0.0,
+                       "mode": "Idle", "length": 0.0, "position": 0.0}.items()), snapshot
             self.stop(consumer)
             self.stop(self.mic_a)
             self.stop(self.mic_b)
@@ -342,6 +516,7 @@ wireplumber.profiles = { main = {
             self.mic_b = self.mic("mic_b")
             self.ready("mic_b")
             self.stable(lambda: self.default() == "mic_a")
+            self.live(False)
         self.check("PipeWire restart clears graph and respects user default", restart_server)
 
         def audio():
@@ -376,6 +551,7 @@ wireplumber.profiles = { main = {
             self.wait(lambda: self.snapshot()["mode"] == "Idle"
                       and self.snapshot()["length"] >= 9.9,
                       "recording reaches its limit without autoplay", seconds=12)
+            self.live(False)
             assert self.state.get("preview_error") is None, "recording must not open a speaker stream"
             self.command("play")
             self.wait(lambda: self.state.get("preview_error") is not None,
@@ -397,15 +573,27 @@ wireplumber.profiles = { main = {
             self.command("play_cleaned", value=False)
             self.command("play")
             self.wait(lambda: self.snapshot()["position"] > 0, "original sample playing")
+            self.live(False)
             self.command("play_cleaned", value=True)
             self.wait(lambda: self.snapshot()["position"] > 0.3, "cleaned comparison playing")
+            self.live(False)
             self.command("play_cleaned", value=False)
             self.wait(lambda: self.snapshot()["mode"] == "Idle", "playback ends without a periodic tick")
             assert self.state.get("preview_error") is None, self.state
+            self.live(False)
+            for original in (False, True, False):
+                self.command("monitor")
+                self.command("monitor_original", value=original)
+                self.live(True)
+            self.command("stop")
+            self.live(False)
             self.ready("mic_b")
             assert not any(obj.get("info", {}).get("props", {}).get("node.name") == "esquie-preview"
                            for obj in self.graph()), "finished speaker stream was not destroyed"
         self.check("sample comparison switches and playback completion preserve live audio", playback_comparison)
+
+        self.check("immediate onset survives repeated idle/resume without stale audio",
+                   self.onset_scenarios, seconds=15)
 
         def clocks():
             for rate, quantum in ((44100, 256), (48000, 1024)):
