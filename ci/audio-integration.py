@@ -26,7 +26,7 @@ class Suite:
         self.state, self.history, self.results = {}, [], []
         self.engine = None
 
-    def setup(self, private):
+    def setup(self, private, *, activate_services=True):
         # Whitelist the environment: inherited desktop/audio overrides must
         # never redirect a client or load the developer's configuration.
         self.env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": str(private)}
@@ -73,7 +73,17 @@ wireplumber.profiles = { main = {
 """)
         self.env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + str(private / "no-session-bus")
         if shutil.which("dbus-daemon"):
-            bus = self.spawn("dbus", ["dbus-daemon", "--session", "--nofork", "--print-address=1"],
+            bus_options = ["--session"]
+            if not activate_services:
+                # Benchmarks need only their own tray host. Do not start desktop
+                # portals, accessibility services, or GVfs on the private bus.
+                config_file = private / "dbus.conf"
+                self.write(config_file, f'''<busconfig><type>session</type>
+<listen>unix:tmpdir={private / "run"}</listen><policy context="default">
+<allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/>
+</policy></busconfig>''')
+                bus_options = [f"--config-file={config_file}"]
+            bus = self.spawn("dbus", ["dbus-daemon", *bus_options, "--nofork", "--print-address=1"],
                              stdout=subprocess.PIPE)
             self.env["DBUS_SESSION_BUS_ADDRESS"] = bus.stdout.readline().strip()
             assert self.env["DBUS_SESSION_BUS_ADDRESS"], "private D-Bus did not start"

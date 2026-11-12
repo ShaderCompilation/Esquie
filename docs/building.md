@@ -182,6 +182,10 @@ status. Results apply only to the tested environment and scenario.
 
 ## Building the AppImage
 
+For opt-in CPU, memory, background-state, and startup measurements, see
+[Measuring resource usage](performance.md). These measurements use private audio
+services and are separate from the automated correctness checks above.
+
 The release AppImage is built in a clean Ubuntu 24.04 container, the oldest
 supported baseline, so it runs on newer glibc versions. It needs Podman or
 Docker on the host (set `CONTAINER_ENGINE` to choose one):

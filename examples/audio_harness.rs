@@ -16,11 +16,17 @@ use serde_json::{Value, json};
 
 /// A fixed-format synthetic microphone in its own process. Unlike pw-loopback,
 /// this has no second, unconnected adapter for older session managers to route.
-fn source(name: &str) -> anyhow::Result<()> {
+fn source(name: &str, signal: &str) -> anyhow::Result<()> {
     use pipewire as pw;
     use pw::properties::properties;
     use pw::spa;
 
+    anyhow::ensure!(
+        matches!(signal, "tone" | "noise" | "silence"),
+        "unknown signal {signal:?}"
+    );
+    let noise = signal == "noise";
+    let silence = signal == "silence";
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
@@ -36,6 +42,7 @@ fn source(name: &str) -> anyhow::Result<()> {
         },
     )?;
     let mut phase = 0.0_f32;
+    let mut random = 1_u32;
     let _listener = stream
         .add_local_listener_with_user_data(())
         .process(move |stream, _| {
@@ -55,7 +62,15 @@ fn source(name: &str) -> anyhow::Result<()> {
                     requested.min(available)
                 };
                 for sample in bytes.as_chunks_mut::<4>().0.iter_mut().take(frames) {
-                    sample.copy_from_slice(&(0.2 * phase.sin()).to_le_bytes());
+                    let value = if silence {
+                        0.0
+                    } else if noise {
+                        random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                        0.2 * (random as f32 / u32::MAX as f32 * 2.0 - 1.0)
+                    } else {
+                        0.2 * phase.sin()
+                    };
+                    sample.copy_from_slice(&value.to_le_bytes());
                     phase =
                         (phase + std::f32::consts::TAU * 440.0 / 48000.0) % std::f32::consts::TAU;
                 }
@@ -104,7 +119,10 @@ fn emit(value: Value) {
 
 fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--source") {
-        return source(&std::env::args().nth(2).expect("synthetic source name"));
+        return source(
+            &std::env::args().nth(2).expect("synthetic source name"),
+            &std::env::args().nth(3).unwrap_or_else(|| "tone".into()),
+        );
     }
     let shared = Arc::new(Shared::new(true, 100.0, true, true));
     let (tx, rx) = pipewire::channel::channel();
