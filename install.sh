@@ -45,25 +45,13 @@ pgrep -x esquie >/dev/null && was_running=true
 install -Dm755 target/release/esquie "$BIN"
 install -Dm644 ui/icon.svg "$ICON"
 
+# The binary writes the launcher so its Exec quoting matches the autostart entry.
 mkdir -p "$(dirname "$DESKTOP")"
-cat >"$DESKTOP" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Esquie
-Comment=Noise removal for your microphone
-Exec=$BIN
-Icon=esquie
-Terminal=false
-Categories=AudioVideo;Audio;Utility;
-Keywords=noise;microphone;mic;suppression;denoise;
-StartupNotify=false
-StartupWMClass=esquie
-EOF
+"$BIN" --print-launcher-entry >"$DESKTOP.tmp"
+mv -f "$DESKTOP.tmp" "$DESKTOP"
 
-# If "Start on login" was enabled from a dev build, point it at the installed binary.
-if [[ -f "$AUTOSTART" ]]; then
-    sed -i "s|^Exec=.*|Exec=\"$BIN\" --hidden|" "$AUTOSTART"
-fi
+# If "Start on login" is enabled, point it at the installed binary.
+"$BIN" --refresh-autostart
 
 refresh_caches
 

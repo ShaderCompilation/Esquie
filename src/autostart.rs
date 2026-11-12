@@ -1,53 +1,147 @@
 //! "Start on login" via an XDG autostart entry (~/.config/autostart/esquie.desktop).
+//!
+//! Sessions that ignore XDG autostart (sway, Hyprland, niri, ...) need
+//! `esquie --hidden` in the compositor's own startup configuration instead.
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
-/// Passed by the autostart entry so Esquie starts quietly in the tray.
-pub const HIDDEN_FLAG: &str = "--hidden";
+use crate::desktop_entry;
 
 fn path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("autostart").join("esquie.desktop"))
 }
 
-/// The entry file is the source of truth, so removing it from the desktop's
-/// own startup settings is reflected here too.
+/// The entry file is the source of truth, so removing or disabling it from
+/// the desktop's own startup settings is reflected here too.
 pub fn is_enabled() -> bool {
-    path().is_some_and(|p| p.exists())
+    path().and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|c| entry_enabled(&c))
 }
 
-pub fn set_enabled(on: bool) -> std::io::Result<()> {
+pub fn set_enabled(on: bool) -> io::Result<()> {
     let Some(p) = path() else { return Ok(()) };
     if !on {
         return match std::fs::remove_file(&p) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         };
     }
-    let exe = std::env::current_exe()?;
-    // Desktop entry quoting: wrap in quotes, escape `"`, `` ` ``, `$` and `\`.
-    let mut quoted = String::from("\"");
-    for c in exe.to_string_lossy().chars() {
-        if matches!(c, '"' | '`' | '$' | '\\') {
-            quoted.push('\\');
-        }
-        quoted.push(c);
+    let entry = desktop_entry::autostart(&desktop_entry::executable()?)?;
+    write(&p, &entry)
+}
+
+/// Points an enabled entry at where Esquie now runs from, e.g. after the
+/// AppImage was moved. Returns whether the entry changed.
+pub fn refresh() -> io::Result<bool> {
+    let Some(p) = path() else { return Ok(false) };
+    let contents = match std::fs::read_to_string(&p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        other => other?,
+    };
+    if !entry_enabled(&contents) {
+        return Ok(false);
     }
-    quoted.push('"');
-    let entry = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Esquie\n\
-         Comment=Noise removal for your microphone\n\
-         Exec={quoted} {HIDDEN_FLAG}\n\
-         Icon=audio-input-microphone\n\
-         Terminal=false\n\
-         X-GNOME-Autostart-enabled=true\n"
-    );
+    let exe = desktop_entry::executable()?;
+    let updated = match with_exec(&contents, &desktop_entry::autostart_exec(&exe)?) {
+        Some(updated) => updated,
+        // No Exec line to update: the entry is unusable, so rewrite it.
+        None => desktop_entry::autostart(&exe)?,
+    };
+    if updated == contents {
+        return Ok(false);
+    }
+    write(&p, &updated)?;
+    Ok(true)
+}
+
+/// Replace the file atomically so a crash never leaves a truncated entry.
+fn write(p: &Path, contents: &str) -> io::Result<()> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(p, entry)
+    let tmp = p.with_extension("desktop.tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, p).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// `(key, value)` pairs of the `[Desktop Entry]` group, with line indices.
+fn main_group(contents: &str) -> impl Iterator<Item = (usize, &str, &str)> {
+    let mut in_main = false;
+    contents.lines().enumerate().filter_map(move |(i, line)| {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_main = line == "[Desktop Entry]";
+            return None;
+        }
+        if !in_main || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        Some((i, key.trim(), value.trim()))
+    })
+}
+
+fn entry_enabled(contents: &str) -> bool {
+    !main_group(contents)
+        .any(|(_, k, v)| (k == "Hidden" && v == "true") || (k == "X-GNOME-Autostart-enabled" && v == "false"))
+}
+
+/// `contents` with its `Exec` value replaced, keeping every other line
+/// (including ones the user added). `None` without an `Exec` key.
+fn with_exec(contents: &str, exec: &str) -> Option<String> {
+    let (index, _, _) = main_group(contents).find(|(_, k, _)| *k == "Exec")?;
+    let mut out = String::with_capacity(contents.len() + exec.len());
+    for (i, line) in contents.lines().enumerate() {
+        if i == index {
+            out.push_str("Exec=");
+            out.push_str(exec);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !contents.ends_with('\n') {
+        out.pop();
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop_entry::tests::parse_exec;
+
+    #[test]
+    fn enabled_state() {
+        let entry = desktop_entry::autostart(Path::new("/usr/bin/esquie")).unwrap();
+        assert!(entry_enabled(&entry));
+        assert!(!entry_enabled(&entry.replace("X-GNOME-Autostart-enabled=true", "X-GNOME-Autostart-enabled=false")));
+        assert!(!entry_enabled(&format!("{entry}Hidden=true\n")));
+        // Keys in other groups don't count.
+        assert!(entry_enabled(&format!("{entry}[Desktop Action x]\nHidden=true\n")));
+    }
+
+    #[test]
+    fn refresh_replaces_only_exec() {
+        let old = "[Desktop Entry]\nType=Application\nName=Esquie\nExec=/tmp/.mount_EsquieX/usr/bin/esquie --hidden\n\
+                   X-GNOME-Autostart-Delay=5\n\n[Desktop Action x]\nExec=other\n";
+        let exec = desktop_entry::autostart_exec(Path::new("/home/a b/Esquie.AppImage")).unwrap();
+        let new = with_exec(old, &exec).unwrap();
+        assert_eq!(
+            new,
+            "[Desktop Entry]\nType=Application\nName=Esquie\nExec=\"/home/a b/Esquie.AppImage\" --hidden\n\
+             X-GNOME-Autostart-Delay=5\n\n[Desktop Action x]\nExec=other\n"
+        );
+        let line = new.lines().find_map(|l| l.strip_prefix("Exec=")).unwrap();
+        assert_eq!(parse_exec(line), ["/home/a b/Esquie.AppImage", "--hidden"]);
+        // Already current: unchanged.
+        assert_eq!(with_exec(&new, &exec).unwrap(), new);
+        assert_eq!(with_exec("[Desktop Entry]\nName=Esquie\n", &exec), None);
+    }
 }

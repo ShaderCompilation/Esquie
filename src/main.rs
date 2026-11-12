@@ -1,5 +1,6 @@
 mod audio;
 mod autostart;
+mod desktop_entry;
 mod dsp;
 mod settings;
 mod tray;
@@ -14,11 +15,33 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
 
+/// How long a hidden window waits for a tray to (re)appear before showing
+/// itself, so login races and tray restarts don't pop the window up.
+const TRAY_GRACE: Duration = Duration::from_secs(3);
+
 fn main() -> anyhow::Result<()> {
-    // Handle this before settings, desktop services, or the audio engine exist.
-    if std::env::args_os().skip(1).any(|arg| arg == "--version") {
+    // Handle these before settings, desktop services, or the audio engine exist.
+    let has_arg = |flag: &str| std::env::args_os().skip(1).any(|arg| arg == flag);
+    if has_arg("--version") {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    // Used by install.sh, so the launcher shares the autostart entry's quoting.
+    if has_arg("--print-launcher-entry") {
+        print!("{}", desktop_entry::launcher(&desktop_entry::executable()?)?);
+        return Ok(());
+    }
+    if has_arg("--refresh-autostart") {
+        autostart::refresh()?;
+        return Ok(());
+    }
+
+    // Follow a moved binary or AppImage. Skipped in debug builds so `cargo run`
+    // doesn't point login startup at the build directory.
+    if !cfg!(debug_assertions)
+        && let Err(e) = autostart::refresh()
+    {
+        eprintln!("Could not update autostart entry: {e}");
     }
 
     let settings = Arc::new(Mutex::new(Settings::load()));
@@ -43,7 +66,8 @@ fn main() -> anyhow::Result<()> {
     ui.set_autostart(autostart::is_enabled());
 
     // Tray icon. Its callbacks run on the tray thread, so hop to the UI thread.
-    let tray = {
+    // `has-tray` tracks whether the icon is visible right now.
+    let spawned = {
         let ui_weak = ui.as_weak();
         tray::spawn(initial.enabled, ui.get_autostart(), move |action| {
             let _ = ui_weak.upgrade_in_event_loop(move |ui| match action {
@@ -64,10 +88,20 @@ fn main() -> anyhow::Result<()> {
                 tray::Action::Quit => {
                     let _ = slint::quit_event_loop();
                 }
+                tray::Action::Available(available) => {
+                    ui.set_has_tray(available);
+                    if !available {
+                        reveal_without_tray_later(&ui);
+                    }
+                }
             });
         })
     };
-    ui.set_has_tray(tray.is_some());
+    let (tray, tray_available) = match spawned {
+        Some((handle, available)) => (Some(handle), available),
+        None => (None, false),
+    };
+    ui.set_has_tray(tray_available);
 
     // Audio thread (PipeWire + DeepFilterNet).
     let (cmd_tx, cmd_rx) = pipewire::channel::channel::<Command>();
@@ -201,16 +235,23 @@ fn main() -> anyhow::Result<()> {
     }
 
     // With a tray, closing the window just hides it; quit from the tray menu.
-    // Without one, closing the window quits as usual.
-    if tray.is_none() {
-        ui.window().on_close_requested(|| {
-            let _ = slint::quit_event_loop();
+    // Without one, closing the window quits as usual. Decided per close, as
+    // the tray can come and go.
+    {
+        let ui_weak = ui.as_weak();
+        ui.window().on_close_requested(move || {
+            if !ui_weak.upgrade().is_some_and(|ui| ui.get_has_tray()) {
+                let _ = slint::quit_event_loop();
+            }
             slint::CloseRequestResponse::HideWindow
         });
     }
-    let start_hidden = tray.is_some() && std::env::args().any(|a| a == autostart::HIDDEN_FLAG);
-    if !start_hidden {
+    // `--hidden` only makes sense with a tray to get the window back from.
+    // A tray that may still be starting (e.g. at login) gets a grace period.
+    if !has_arg(desktop_entry::HIDDEN_FLAG) || tray.is_none() {
         ui.show()?;
+    } else if !tray_available {
+        reveal_without_tray_later(&ui);
     }
     slint::run_event_loop_until_quit()?;
 
@@ -221,6 +262,18 @@ fn main() -> anyhow::Result<()> {
     let _ = cmd_tx.send(Command::Quit);
     let _ = audio_thread.join();
     Ok(())
+}
+
+/// Show the window if it is still hidden without a tray after [`TRAY_GRACE`],
+/// so Esquie never ends up running with no way to reach it.
+fn reveal_without_tray_later(ui: &AppWindow) {
+    let ui_weak = ui.as_weak();
+    slint::Timer::single_shot(TRAY_GRACE, move || {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        if !ui.get_has_tray() && !ui.window().is_visible() {
+            let _ = ui.show();
+        }
+    });
 }
 
 fn apply_event(ui: &AppWindow, event: Event) {

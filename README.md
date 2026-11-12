@@ -58,6 +58,31 @@ the display, D-Bus, or PipeWire.
 
 Settings are saved in `~/.config/esquie/settings`.
 
+## Tray and start on login
+
+With a StatusNotifier tray (KDE, Xfce, GNOME with the AppIndicator extension,
+or a panel such as Waybar), closing the window keeps Esquie running in the
+tray; quit from the tray menu. Without a tray, closing the window quits. Esquie
+notices a tray that starts late, restarts, or goes away: if it is hidden and the
+tray is still missing after a few seconds, the window reappears.
+
+**Start on login** writes `~/.config/autostart/esquie.desktop`, which starts
+Esquie with `--hidden`. `--hidden` only hides the window while a tray exists to
+bring it back from. The entry points at the installed binary, or at the
+AppImage file itself (never its temporary mount). After moving the AppImage,
+launch it once from the new location to update the entry; turning the option
+off in the desktop's own startup settings is respected.
+
+Compositors that don't process XDG autostart entries (for example sway,
+Hyprland, niri, and river without a session manager) need Esquie in their own
+startup configuration instead:
+
+```sh
+# sway / i3:       exec /path/to/esquie --hidden
+# Hyprland:        exec-once = /path/to/esquie --hidden
+# niri (KDL):      spawn-at-startup "/path/to/esquie" "--hidden"
+```
+
 ## How it works
 
 ```

@@ -1,5 +1,12 @@
 //! System tray icon (StatusNotifierItem). Works on KDE, and on GNOME with the
 //! AppIndicator extension.
+//!
+//! The tray host (StatusNotifierWatcher) may start after Esquie, restart, or
+//! go away for good. The service stays alive throughout, re-registers whenever
+//! a watcher appears, and reports availability through [`Action::Available`].
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, StandardItem};
@@ -11,22 +18,31 @@ pub enum Action {
     SetEnabled(bool),
     SetAutostart(bool),
     Quit,
+    /// The icon became visible (`true`) or lost its tray host (`false`).
+    Available(bool),
 }
 
 pub struct Tray {
     pub enabled: bool,
     pub autostart: bool,
     icon: Vec<Icon>,
+    available: Arc<AtomicBool>,
     on_action: Box<dyn Fn(Action) + Send>,
 }
 
 pub type Handle = ksni::blocking::Handle<Tray>;
 
-/// Returns `None` when the desktop has no tray to show the icon in.
-pub fn spawn(enabled: bool, autostart: bool, on_action: impl Fn(Action) + Send + 'static) -> Option<Handle> {
-    let tray = Tray { enabled, autostart, icon: render_icon(), on_action: Box::new(on_action) };
-    match tray.spawn() {
-        Ok(handle) => Some(handle),
+/// Starts the tray service and returns its handle with whether the icon is
+/// visible right now. `None` means no tray is possible (e.g. no D-Bus session).
+/// Later availability changes arrive as [`Action::Available`].
+pub fn spawn(enabled: bool, autostart: bool, on_action: impl Fn(Action) + Send + 'static) -> Option<(Handle, bool)> {
+    // Optimistic: registration failures during spawn call watcher_offline.
+    let available = Arc::new(AtomicBool::new(true));
+    let tray = Tray { enabled, autostart, icon: render_icon(), available: available.clone(), on_action: Box::new(on_action) };
+    // Keep running without a watcher so a tray that starts later still gets
+    // the icon (ksni re-registers when the watcher's bus name appears).
+    match tray.assume_sni_available(true).spawn() {
+        Ok(handle) => Some((handle, available.load(Ordering::SeqCst))),
         Err(e) => {
             eprintln!("System tray not available: {e}");
             None
@@ -53,6 +69,19 @@ impl ksni::Tray for Tray {
             description: if self.enabled { "Noise removal is on" } else { "Noise removal is off" }.into(),
             ..Default::default()
         }
+    }
+
+    fn watcher_online(&self) {
+        // Registration follows; if it fails, watcher_offline reports that.
+        self.available.store(true, Ordering::SeqCst);
+        (self.on_action)(Action::Available(true));
+    }
+
+    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+        eprintln!("System tray not available: {reason:?}");
+        self.available.store(false, Ordering::SeqCst);
+        (self.on_action)(Action::Available(false));
+        true // keep waiting for a tray to (re)appear
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -122,4 +151,114 @@ fn render_icon() -> Vec<Icon> {
             Some(Icon { width: size as i32, height: size as i32, data })
         })
         .collect()
+}
+
+/// Tray availability against a fake StatusNotifierWatcher that starts late,
+/// disappears, and returns. Needs a private session bus, never the desktop's:
+/// see docs/phase3-validation.md.
+#[cfg(test)]
+mod live {
+    use super::*;
+    use std::sync::mpsc::{Receiver, channel};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct Watcher(Arc<Mutex<Vec<String>>>);
+
+    #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+    impl Watcher {
+        fn register_status_notifier_item(&self, service: &str) {
+            self.0.lock().unwrap().push(service.to_owned());
+        }
+
+        fn register_status_notifier_host(&self, _service: &str) {}
+
+        #[zbus(property)]
+        fn is_status_notifier_host_registered(&self) -> bool {
+            true
+        }
+
+        #[zbus(property)]
+        fn registered_status_notifier_items(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        #[zbus(property)]
+        fn protocol_version(&self) -> i32 {
+            0
+        }
+    }
+
+    fn start_watcher(items: &Arc<Mutex<Vec<String>>>) -> zbus::blocking::Connection {
+        zbus::blocking::connection::Builder::session()
+            .unwrap()
+            .name("org.kde.StatusNotifierWatcher")
+            .unwrap()
+            .serve_at("/StatusNotifierWatcher", Watcher(items.clone()))
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn next(rx: &Receiver<bool>) -> bool {
+        rx.recv_timeout(Duration::from_secs(5)).expect("availability change")
+    }
+
+    fn assert_quiet(rx: &Receiver<bool>) {
+        assert_eq!(rx.recv_timeout(Duration::from_millis(300)).ok(), None, "unexpected availability change");
+    }
+
+    fn spawn_reporting() -> (Handle, bool, Receiver<bool>) {
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let (handle, available) = spawn(true, false, move |action| {
+            if let Action::Available(on) = action {
+                tx.lock().unwrap().send(on).unwrap();
+            }
+        })
+        .expect("tray service on the private bus");
+        (handle, available, rx)
+    }
+
+    #[test]
+    #[ignore = "needs ESQUIE_PRIVATE_BUS=1 and a private D-Bus session"]
+    fn tray_availability() {
+        assert_eq!(
+            std::env::var("ESQUIE_PRIVATE_BUS").as_deref(),
+            Ok("1"),
+            "refusing to fake a tray watcher on the desktop's session bus"
+        );
+        let items = Arc::new(Mutex::new(Vec::new()));
+
+        // No tray host yet: the service still starts and reports unavailable.
+        let (handle, available, rx) = spawn_reporting();
+        assert!(!available);
+        assert!(!next(&rx));
+        assert_quiet(&rx);
+
+        // The tray starts late: the item registers and becomes available.
+        let watcher = start_watcher(&items);
+        assert!(next(&rx));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(items.lock().unwrap().len(), 1);
+        assert_quiet(&rx);
+
+        // The tray disappears, then returns.
+        drop(watcher);
+        assert!(!next(&rx));
+        let watcher = start_watcher(&items);
+        assert!(next(&rx));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(items.lock().unwrap().len(), 2);
+
+        // With a tray present at startup, it is available immediately.
+        let (second, available, rx2) = spawn_reporting();
+        assert!(available);
+        assert_quiet(&rx2);
+        assert_eq!(items.lock().unwrap().len(), 3);
+
+        second.shutdown().wait();
+        handle.shutdown().wait();
+        drop(watcher);
+    }
 }
