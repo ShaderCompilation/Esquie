@@ -460,8 +460,7 @@ pub(crate) mod tests {
 
     #[test]
     fn appimage_uses_persistent_path() {
-        let dir =
-            std::env::temp_dir().join(format!("esquie-appimage-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("esquie-appimage-test-{}", std::process::id()));
         let mount = dir.join(".mount_EsquieAbCdEf");
         std::fs::create_dir_all(mount.join("usr/bin")).unwrap();
         let image = dir.join("My Apps/Esquie.AppImage");

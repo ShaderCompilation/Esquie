@@ -54,7 +54,7 @@ pub fn spawn(
     match tray.assume_sni_available(true).spawn() {
         Ok(handle) => Some((handle, available.load(Ordering::SeqCst))),
         Err(e) => {
-            eprintln!("System tray not available: {e}");
+            tracing::warn!("System tray not available: {e}");
             None
         }
     }
@@ -93,7 +93,7 @@ impl ksni::Tray for Tray {
     }
 
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
-        eprintln!("System tray not available: {reason:?}");
+        tracing::warn!("System tray not available: {reason:?}");
         self.available.store(false, Ordering::SeqCst);
         (self.on_action)(Action::Available(false));
         true // keep waiting for a tray to (re)appear

@@ -27,6 +27,7 @@ use pw::spa;
 use pw::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 
 use crate::dsp::{Gate, HighPass, Tuning};
+use tracing::{debug, error, info, info_span, warn};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const VIRTUAL_NODE_NAME: &str = "esquie";
@@ -428,8 +429,8 @@ impl Engine {
     /// so that uneven callback timing doesn't cause crackles.
     fn pull_output(&mut self, out: &mut [f32]) {
         let have = self.queue.len();
-        if !pull(&mut self.queue, &mut self.primed, out, self.hop) && debug() {
-            eprintln!("underrun: want {} have {have}", out.len());
+        if !pull(&mut self.queue, &mut self.primed, out, self.hop) {
+            debug!("underrun: want {} have {have}", out.len());
         }
     }
 
@@ -469,12 +470,6 @@ impl Engine {
         self.preview.set_mode(PreviewMode::Playing, &self.shared);
         true
     }
-}
-
-/// Set ESQUIE_DEBUG=1 to log underruns, status changes and retries to stderr.
-fn debug() -> bool {
-    static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DEBUG.get_or_init(|| std::env::var_os("ESQUIE_DEBUG").is_some())
 }
 
 fn mono_f32_params() -> Vec<u8> {
@@ -709,9 +704,7 @@ impl App {
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                if debug() {
-                    eprintln!("PipeWire connection failed: {msg}");
-                }
+                warn!("PipeWire connection failed, will retry: {msg}");
                 self.server_error.replace(Some(msg));
                 self.reconnect.borrow_mut().schedule(Instant::now());
             }
@@ -719,6 +712,7 @@ impl App {
     }
 
     fn try_connect(self: &Rc<Self>) -> Result<Rc<Conn>> {
+        let _span = info_span!("pipewire_connect").entered();
         let core = self
             .context
             .connect_rc(None)
@@ -740,9 +734,7 @@ impl App {
             .add_listener_local()
             .error(move |id, _seq, res, message| {
                 if id != pw::core::PW_ID_CORE {
-                    if debug() {
-                        eprintln!("PipeWire error on object {id}: {message} ({res})");
-                    }
+                    debug!("PipeWire error on object {id}: {message} ({res})");
                     return;
                 }
                 if let Some(app) = error_app.upgrade() {
@@ -801,7 +793,7 @@ impl App {
                     conn.sync_seq.set(seq.seq());
                     return;
                 }
-                Err(e) => eprintln!("PipeWire sync failed: {e}"),
+                Err(e) => error!("PipeWire sync failed: {e}"),
             }
         }
         conn.sync_seq.set(-1);
@@ -814,7 +806,7 @@ impl App {
 
     /// Tear the connection down and forget everything learned from it.
     fn disconnect(&self, reason: String) {
-        eprintln!("Lost connection to PipeWire: {reason}");
+        warn!("Lost connection to PipeWire: {reason}");
         if let Some(conn) = self.conn.take() {
             conn.teardown();
         }
@@ -896,9 +888,7 @@ impl App {
     fn update_status(&self, now: Instant) {
         let status = self.compute_status(now);
         if self.status.borrow().as_ref() != Some(&status) {
-            if debug() {
-                eprintln!("status: {status:?}");
-            }
+            info!("status: {status:?}");
             self.status.replace(Some(status.clone()));
             (self.notify)(Event::Status(status));
         }
@@ -993,7 +983,7 @@ impl App {
         let metadata = match registry.bind::<pw::metadata::Metadata, _>(obj) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("Could not bind default-device metadata: {e}");
+                warn!("Could not bind default-device metadata: {e}");
                 return;
             }
         };
@@ -1165,13 +1155,14 @@ impl App {
             }
             Err(e) => {
                 let msg = format!("Could not open {}: {e:#}", self.active_label(conn));
-                eprintln!("{msg}");
+                error!("{msg}");
                 conn.capture_state.replace(CaptureState::Failed(msg));
             }
         }
     }
 
     fn stop_capture(&self, conn: &Conn) {
+        info!("stopping capture");
         conn.capture.replace(None);
         conn.active.replace(None);
         conn.capture_state.replace(CaptureState::Idle);
@@ -1186,6 +1177,8 @@ impl App {
     }
 
     fn make_source(self: &Rc<Self>, conn: &Conn) -> Result<Stream> {
+        let _span = info_span!("stream", stream = "virtual_mic").entered();
+        info!("starting virtual microphone stream");
         let stream = StreamRc::new(
             conn.core.clone(),
             "esquie",
@@ -1250,6 +1243,8 @@ impl App {
     }
 
     fn make_capture(&self, conn: &Conn, target: &str) -> Result<Stream> {
+        let _span = info_span!("stream", stream = "capture", mic = target).entered();
+        info!("starting capture from {target}");
         let stream = StreamRc::new(
             conn.core.clone(),
             "esquie-input",
@@ -1346,6 +1341,8 @@ impl App {
     }
 
     fn make_preview(&self, conn: &Conn) -> Result<Stream> {
+        let _span = info_span!("stream", stream = "preview").entered();
+        info!("starting test playback stream");
         let stream = StreamRc::new(
             conn.core.clone(),
             "esquie-preview",
@@ -1575,6 +1572,8 @@ pub fn run(
     let ticker = mainloop.loop_().add_timer(move |_| st.tick());
     ticker.update_timer(Some(TICK), Some(TICK));
 
+    // Spans the whole audio run loop, including reconnects.
+    let _run_span = info_span!("audio_run").entered();
     app.update_status(Instant::now());
     app.connect();
     mainloop.run();

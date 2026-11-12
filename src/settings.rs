@@ -95,7 +95,7 @@ impl Settings {
 
     pub fn save(&self) {
         if let Err(e) = self.try_save() {
-            eprintln!("Could not save settings: {e}");
+            tracing::warn!("Could not save settings: {e}");
         }
     }
 

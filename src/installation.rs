@@ -180,8 +180,7 @@ fn scan(
         let identity = ["Name", "StartupWMClass", "X-AppImage-Name"]
             .iter()
             .any(|k| {
-                desktop_entry::value(&contents, k)
-                    .is_some_and(|v| v.eq_ignore_ascii_case("esquie"))
+                desktop_entry::value(&contents, k).is_some_and(|v| v.eq_ignore_ascii_case("esquie"))
             });
         let path_match = desktop_entry::exec_program(&contents)
             .is_some_and(|p| same_path(&p, exe) || installed.is_some_and(|i| same_path(&p, i)));
@@ -284,9 +283,7 @@ fn stage_integration(
     let external = inventory.launchers.iter().any(|l| !l.owned || !l.user);
     // Respect managers' existing launchers rather than creating a duplicate.
     if !owned.is_empty() || !external {
-        let icon = locations
-            .data
-            .join("icons/hicolor/scalable/apps/esquie.svg");
+        let icon = locations.data.join("icons/hicolor/scalable/apps/esquie.svg");
         if icon.exists()
             && fs::read(&icon)? != include_bytes!("../ui/icon.svg")
             && (owned.is_empty() || external)
@@ -328,9 +325,7 @@ pub fn remove_launchers(locations: &Locations, inventory: &Inventory) -> io::Res
             removed = true;
         }
     }
-    let icon = locations
-        .data
-        .join("icons/hicolor/scalable/apps/esquie.svg");
+    let icon = locations.data.join("icons/hicolor/scalable/apps/esquie.svg");
     if removed
         && !inventory.launchers.iter().any(|l| !l.owned || !l.user)
         && fs::read(&icon).is_ok_and(|b| b == include_bytes!("../ui/icon.svg"))
@@ -568,12 +563,7 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), text);
         assert_eq!(fs::read_to_string(startup).unwrap(), text);
-        assert!(
-            !s.locations
-                .data
-                .join("applications/esquie.desktop")
-                .exists()
-        );
+        assert!(!s.locations.data.join("applications/esquie.desktop").exists());
     }
 
     #[test]

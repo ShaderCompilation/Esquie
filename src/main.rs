@@ -5,6 +5,7 @@ mod dsp;
 mod file_ops;
 mod installation;
 mod installation_ui;
+mod logging;
 mod settings;
 mod tray;
 
@@ -15,6 +16,7 @@ use std::time::Duration;
 use audio::{Command, Event, PreviewMode, Shared, Status};
 use settings::{Settings, strength_to_db};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+use tracing::{error, info, warn};
 
 slint::include_modules!();
 
@@ -42,13 +44,29 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Logging and crash capture come before anything that can fail or hang.
+    // (The early-exit args above only print to stdout and never log.)
+    logging::init();
+    logging::install_panic_hook();
+    let crashed_last_run = logging::take_last_crash().is_some();
+
     // Follow a moved binary or AppImage. Skipped in debug builds so `cargo run`
     // doesn't point login startup at the build directory.
     if !cfg!(debug_assertions)
         && let Err(e) = autostart::refresh()
     {
-        eprintln!("Could not update autostart entry: {e}");
+        warn!("Could not update autostart entry: {e}");
     }
+    info!(
+        "starting {} {}{}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        if crashed_last_run {
+            " (previous run crashed)"
+        } else {
+            ""
+        }
+    );
 
     let settings = Arc::new(Mutex::new(Settings::load()));
     let initial = settings.lock().unwrap().clone();
@@ -126,7 +144,7 @@ fn main() -> anyhow::Result<()> {
                 };
                 if let Err(e) = audio::run(shared, mic, cmd_rx, notify) {
                     let msg = format!("Audio engine failed: {e:#}");
-                    eprintln!("{msg}");
+                    error!("{msg}");
                     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                         apply_event(&ui, Event::Status(Status::Failed(msg)))
                     });
@@ -171,7 +189,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         ui.on_autostart_changed(move |on| {
             if let Err(e) = autostart::set_enabled(on) {
-                eprintln!("Could not update autostart: {e}");
+                warn!("Could not update autostart: {e}");
             }
             // Re-read so the toggle shows what actually happened.
             let actual = autostart::is_enabled();
