@@ -81,8 +81,10 @@ fn refresh_follows_moved_appimage() {
     scratch.run("--refresh-autostart", &appimage_env);
     assert!(!scratch.autostart().exists());
 
+    // Signature of the pre-marker Esquie autostart template.
     let stale = "[Desktop Entry]\nType=Application\nName=Esquie\n\
-                 Exec=/tmp/.mount_EsquieOld/usr/bin/esquie --hidden\nX-GNOME-Autostart-Delay=2\n";
+                 Comment=Noise removal for your microphone\nIcon=audio-input-microphone\n\
+                 X-GNOME-Autostart-enabled=true\nExec=/tmp/.mount_EsquieOld/usr/bin/esquie --hidden\nX-GNOME-Autostart-Delay=2\n";
     std::fs::create_dir_all(scratch.autostart().parent().unwrap()).unwrap();
     std::fs::write(scratch.autostart(), stale).unwrap();
     scratch.run("--refresh-autostart", &appimage_env);
@@ -116,4 +118,59 @@ fn refresh_follows_moved_appimage() {
         std::fs::read_to_string(scratch.autostart()).unwrap(),
         disabled
     );
+}
+
+#[test]
+fn external_startup_entry_is_not_retargeted() {
+    let scratch = Scratch::new("external-startup");
+    let external = "[Desktop Entry]\nType=Application\nName=Esquie\nExec=/managed/Esquie.AppImage --hidden\nX-AppImage-Name=Esquie\n";
+    std::fs::create_dir_all(scratch.autostart().parent().unwrap()).unwrap();
+    std::fs::write(scratch.autostart(), external).unwrap();
+    scratch.run("--refresh-autostart", &[]);
+    assert_eq!(
+        std::fs::read_to_string(scratch.autostart()).unwrap(),
+        external
+    );
+}
+
+#[test]
+fn saved_handoff_target_survives_launches_from_original_download() {
+    let scratch = Scratch::new("handoff");
+    let installed = scratch.0.join("My Apps/100%/esquie");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    std::fs::write(&installed, b"installed payload").unwrap();
+    let config = scratch.0.join("config/esquie/settings");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let settings = format!(
+        "mic=keep-this\nenabled=false\ninstall_prompt=never\ninstalled_path={}\n",
+        serde_json::to_string(&installed.to_str().unwrap()).unwrap()
+    );
+    std::fs::write(&config, &settings).unwrap();
+    std::fs::create_dir_all(scratch.autostart().parent().unwrap()).unwrap();
+    std::fs::write(
+        scratch.autostart(),
+        "[Desktop Entry]\nName=Esquie\nX-Esquie-Owned=true\nExec=/original/download --hidden\n",
+    )
+    .unwrap();
+    let alternate = scratch
+        .autostart()
+        .with_file_name("alternate-startup.desktop");
+    std::fs::copy(scratch.autostart(), &alternate).unwrap();
+    let exe = std::fs::canonicalize(EXE).unwrap();
+    let original = scratch.0.join("Downloads/original.AppImage");
+    std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+    std::fs::write(&original, b"original download").unwrap();
+    for _ in 0..2 {
+        scratch.run(
+            "--refresh-autostart",
+            &[("APPIMAGE", &original), ("APPDIR", exe.parent().unwrap())],
+        );
+        for path in [scratch.autostart(), alternate.clone()] {
+            let entry = std::fs::read_to_string(path).unwrap();
+            assert!(exec_of(&entry).contains("My Apps/100%%/esquie"), "{entry}");
+            assert!(!entry.contains("Downloads"), "{entry}");
+        }
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), settings);
+        assert_eq!(std::fs::read(&original).unwrap(), b"original download");
+    }
 }

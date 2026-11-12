@@ -56,6 +56,7 @@ pub fn launcher(exe: &Path) -> io::Result<String> {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=Esquie\n\
+         X-Esquie-Owned=true\n\
          Comment={COMMENT}\n\
          Exec={}\n\
          Icon=esquie\n\
@@ -74,6 +75,7 @@ pub fn autostart(exe: &Path) -> io::Result<String> {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=Esquie\n\
+         X-Esquie-Owned=true\n\
          Comment={COMMENT}\n\
          Exec={}\n\
          Icon=audio-input-microphone\n\
@@ -165,6 +167,137 @@ fn escape_value(value: &str) -> io::Result<String> {
         }
     }
     Ok(out)
+}
+
+/// Only keys in the main group count; actions can have unrelated commands.
+pub fn main_group(contents: &str) -> impl Iterator<Item = (usize, &str, &str)> {
+    let mut in_main = false;
+    contents.lines().enumerate().filter_map(move |(i, line)| {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_main = line == "[Desktop Entry]";
+        }
+        if !in_main || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        Some((i, key.trim(), value.trim()))
+    })
+}
+
+pub fn value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
+    main_group(contents).find_map(|(_, k, v)| (k == key).then_some(v))
+}
+
+/// Explicit ownership for new entries, or the signature of our old templates.
+/// A name or executable match alone never grants permission to change a file.
+pub fn owned(contents: &str) -> bool {
+    if value(contents, "Name") != Some("Esquie") {
+        return false;
+    }
+    // Managers can retain keys from the packaged desktop entry when they
+    // integrate it. Their metadata takes precedence over our original marker.
+    if main_group(contents).any(|(_, k, _)| {
+        k.starts_with("X-AppImage") || k.to_ascii_lowercase().contains("gearlever")
+    }) {
+        return false;
+    }
+    if value(contents, "X-Esquie-Owned") == Some("true") {
+        return true;
+    }
+    value(contents, "Comment") == Some(COMMENT)
+        && value(contents, "Type") == Some("Application")
+        && (value(contents, "StartupWMClass") == Some("esquie")
+            || (value(contents, "Icon") == Some("audio-input-microphone")
+                && value(contents, "X-GNOME-Autostart-enabled").is_some()))
+}
+
+/// Decode an Exec command without invoking a shell. Also understands the exact
+/// percent-path wrapper generated above, and external managers' `env` prefix.
+pub fn exec_program(contents: &str) -> Option<PathBuf> {
+    let raw = value(contents, "Exec")?;
+    let mut unescaped = String::new();
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        unescaped.push(if c == '\\' {
+            match chars.next()? {
+                's' => ' ',
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '\\' => '\\',
+                _ => return None,
+            }
+        } else {
+            c
+        });
+    }
+    let mut argv = Vec::new();
+    let mut arg = String::new();
+    let mut quote = None;
+    let mut active = false;
+    let mut chars = unescaped.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' if quote == Some(c) => quote = None,
+            '"' | '\'' if quote.is_none() => {
+                quote = Some(c);
+                active = true;
+            }
+            '\\' if quote != Some('\'') => {
+                arg.push(chars.next()?);
+                active = true;
+            }
+            c if c.is_whitespace() && quote.is_none() => {
+                if active {
+                    argv.push(std::mem::take(&mut arg));
+                    active = false;
+                }
+            }
+            '%' => match chars.next()? {
+                '%' => {
+                    arg.push('%');
+                    active = true;
+                }
+                'f' | 'F' | 'u' | 'U' | 'i' | 'c' | 'k' => {}
+                _ => return None,
+            },
+            c => {
+                arg.push(c);
+                active = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if active {
+        argv.push(arg);
+    }
+    // Field-code arguments don't affect the executable's identity.
+    program_from_args(&argv)
+}
+
+fn program_from_args(argv: &[String]) -> Option<PathBuf> {
+    if argv.len() >= 4
+        && matches!(argv[0].as_str(), "sh" | "/bin/sh")
+        && argv[1] == "-c"
+        && argv[2] == SH_EXEC
+    {
+        return Some(PathBuf::from(&argv[3]));
+    }
+    let mut args = argv.iter();
+    let first = args.next()?;
+    if matches!(first.as_str(), "env" | "/usr/bin/env") {
+        args.find(|a| {
+            !a.split_once('=').is_some_and(|(key, _)| {
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }) && a.as_str() != "--"
+        })
+        .map(PathBuf::from)
+    } else {
+        Some(PathBuf::from(first))
+    }
 }
 
 #[cfg(test)]
@@ -291,12 +424,30 @@ pub(crate) mod tests {
             assert_eq!(command(parse_exec(&exec)), [path, HIDDEN_FLAG], "{exec}");
             assert_eq!(exec.starts_with("sh "), path.contains('%'), "{exec}");
             let launcher = launcher(Path::new(path)).unwrap();
+            assert_eq!(exec_program(&launcher).unwrap(), Path::new(path));
             let line = launcher
                 .lines()
                 .find_map(|l| l.strip_prefix("Exec="))
                 .unwrap();
             assert_eq!(command(parse_exec(line)), [path], "{line}");
         }
+    }
+
+    #[test]
+    fn manager_metadata_overrides_packaged_ownership_marker() {
+        let packaged = launcher(Path::new("/tmp/Esquie.AppImage")).unwrap();
+        assert!(owned(&packaged));
+        assert!(!owned(&format!("{packaged}X-AppImage-Name=Esquie\n")));
+        assert!(!owned(&format!("{packaged}X-AppImageLauncher-Version=1\n")));
+        assert!(!owned(
+            "[Desktop Entry]\nName=Esquie\nExec=/external/image\n"
+        ));
+        let external = "[Desktop Entry]\nName=Custom\nExec=env SOME_FLAG=1 \"/home/My Apps/a=b.AppImage\" %U\n";
+        assert_eq!(
+            exec_program(external).unwrap(),
+            Path::new("/home/My Apps/a=b.AppImage")
+        );
+        assert!(exec_program("[Desktop Entry]\nExec=\"unterminated\n").is_none());
     }
 
     #[test]

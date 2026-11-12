@@ -76,6 +76,10 @@ the display, D-Bus, or PipeWire.
   noise at a small cost to voice fidelity. On by default.
 - **Silence between words**: fades to silence when you're not speaking. On by default.
 - **Input / Output meters**: raw mic level vs. cleaned level.
+- **Settings**: install a per-user copy, choose its directory, or add, repair,
+  and remove Esquie-owned menu launchers. Installation keeps audio running;
+  switching to the installed copy is explicit. Update controls explain that
+  automatic checks and downloads are not available yet.
 
 Settings are saved in `~/.config/esquie/settings`.
 
@@ -90,9 +94,11 @@ tray is still missing after a few seconds, the window reappears.
 **Start on login** writes `~/.config/autostart/esquie.desktop`, which starts
 Esquie with `--hidden`. `--hidden` only hides the window while a tray exists to
 bring it back from. The entry points at the installed binary, or at the
-AppImage file itself (never its temporary mount). After moving the AppImage,
-launch it once from the new location to update the entry; turning the option
-off in the desktop's own startup settings is respected.
+AppImage file itself (never its temporary mount). An in-app installation
+remembers the selected persistent copy, even while the original is still
+running. After moving it, select its path again with **Add launcher without
+moving the app** in Settings. Turning the option off in the desktop's own
+startup settings is respected; external startup entries are preserved.
 
 Compositors that don't process XDG autostart entries (for example sway,
 Hyprland, niri, and river without a session manager) need Esquie in their own

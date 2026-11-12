@@ -2,6 +2,9 @@ mod audio;
 mod autostart;
 mod desktop_entry;
 mod dsp;
+mod file_ops;
+mod installation;
+mod installation_ui;
 mod settings;
 mod tray;
 
@@ -67,6 +70,7 @@ fn main() -> anyhow::Result<()> {
     ui.set_gate(initial.gate);
     ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
     ui.set_autostart(autostart::is_enabled());
+    let handoff = installation_ui::setup(&ui, settings.clone());
 
     // Tray icon. Its callbacks run on the tray thread, so hop to the UI thread.
     // `has-tray` tracks whether the icon is visible right now.
@@ -79,6 +83,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 tray::Action::ToggleWindow | tray::Action::ShowWindow => {
                     let _ = ui.show();
+                    ui.invoke_consider_install_prompt();
                 }
                 tray::Action::SetEnabled(on) => {
                     ui.set_enabled(on);
@@ -265,6 +270,9 @@ fn main() -> anyhow::Result<()> {
     // A tray that may still be starting (e.g. at login) gets a grace period.
     if !has_arg(desktop_entry::HIDDEN_FLAG) || tray.is_none() {
         ui.show()?;
+        if !has_arg(desktop_entry::HIDDEN_FLAG) {
+            ui.invoke_consider_install_prompt();
+        }
     } else if !tray_available {
         reveal_without_tray_later(&ui);
     }
@@ -276,6 +284,15 @@ fn main() -> anyhow::Result<()> {
 
     let _ = cmd_tx.send(Command::Quit);
     let _ = audio_thread.join();
+    // The old microphone is gone before another process creates its replacement.
+    // Installation alone never gets here with a handoff target.
+    if let Some(target) = handoff.lock().unwrap().take() {
+        std::process::Command::new(target)
+            .env_remove("APPIMAGE")
+            .env_remove("APPDIR")
+            .env_remove("ARGV0")
+            .spawn()?;
+    }
     Ok(())
 }
 

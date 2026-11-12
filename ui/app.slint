@@ -1,4 +1,4 @@
-import { ComboBox, Slider, Switch, Palette } from "std-widgets.slint";
+import { ComboBox, Slider, Switch, Palette, LineEdit, ScrollView } from "std-widgets.slint";
 
 export enum TestMode { idle, recording, playing, monitoring }
 export enum AudioStatus { connecting, disconnected, no-microphone, no-route, ready, failed }
@@ -290,6 +290,7 @@ export component AppWindow inherits Window {
     icon: @image-url("icon.svg");
     preferred-width: 460px;
     min-width: 400px;
+    preferred-height: 880px;
     background: Theme.bg;
     default-font-size: 14px;
 
@@ -313,6 +314,25 @@ export component AppWindow inherits Window {
     in-out property <bool> play-cleaned: true;
     in-out property <bool> autostart;
     in property <bool> has-tray;
+
+    in-out property <bool> settings-open;
+    in-out property <bool> install-prompt;
+    in-out property <bool> prompt-considered;
+    in property <string> installation-info;
+    in property <string> installation-message;
+    in-out property <string> install-directory;
+    in property <bool> installation-busy;
+    in-out property <bool> install-collision;
+    in property <string> collision-path;
+    in property <bool> can-copy;
+    in property <bool> can-switch;
+    in property <bool> automatic-checks;
+    in property <string> app-version;
+    callback consider-install-prompt();
+    callback dismiss-install-prompt(bool);
+    callback directory-changed(string);
+    callback installation-requested(int);
+    callback switch-installation();
 
     callback mic-selected(int);
     callback enabled-changed(bool);
@@ -338,382 +358,449 @@ export component AppWindow inherits Window {
         root.strength-changed(v);
     }
 
-    VerticalLayout {
-        padding: 20px;
-        spacing: 14px;
-        alignment: start;
+    ScrollView {
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            alignment: start;
 
-        // Header
-        HorizontalLayout {
-            spacing: 12px;
-            Rectangle {
-                width: 42px;
-                height: 42px;
-                border-radius: 13px;
-                background: @linear-gradient(135deg, #7b8cff 0%, #8f5cf6 100%);
-                Icon { icon: "mic"; color: #ffffff; width: 22px; height: 22px; }
-            }
-            VerticalLayout {
-                alignment: center;
-                spacing: 1px;
-                horizontal-stretch: 1;
-                Text { text: "Esquie"; font-size: 19px; font-weight: 800; color: Theme.text; }
-                Text { text: "Noise removal for your microphone"; font-size: 12px; color: Theme.text-dim; }
-            }
-            VerticalLayout {
-                alignment: center;
-                Pill {
-                    text: root.audio-status == AudioStatus.failed ? "Error"
-                        : root.audio-status == AudioStatus.connecting ? "Starting…"
-                        : root.audio-status == AudioStatus.disconnected ? "Reconnecting…"
-                        : root.audio-status == AudioStatus.no-microphone ? "No microphone"
-                        : root.audio-status == AudioStatus.no-route ? "Mic unavailable"
-                        : !root.enabled ? "Bypassed"
-                        : "Active";
-                    tint: root.audio-status == AudioStatus.failed
-                            || root.audio-status == AudioStatus.no-microphone
-                            || root.audio-status == AudioStatus.no-route ? Theme.bad
-                        : root.audio-status != AudioStatus.ready || !root.enabled ? Theme.warn
-                        : Theme.good;
-                }
-            }
-        }
-
-        if root.status-message != "": Rectangle {
-            property <color> tint: root.audio-status == AudioStatus.disconnected ? Theme.warn : Theme.bad;
-            border-radius: 12px;
-            background: tint.transparentize(0.88);
-            border-width: 1px;
-            border-color: tint.transparentize(0.6);
+            // Header
             HorizontalLayout {
-                padding: 12px;
-                Text { text: root.status-message; color: tint; wrap: word-wrap; font-size: 13px; }
-            }
-        }
-
-        // Main switch + meters
-        Card {
-            HorizontalLayout {
-                spacing: 20px;
-                VerticalLayout {
-                    alignment: center;
-                    PowerButton {
-                        on <=> root.enabled;
-                        toggled(on) => { root.enabled-changed(on); }
-                    }
+                spacing: 12px;
+                Rectangle {
+                    width: 42px;
+                    height: 42px;
+                    border-radius: 13px;
+                    background: @linear-gradient(135deg, #7b8cff 0%, #8f5cf6 100%);
+                    Icon { icon: "mic"; color: #ffffff; width: 22px; height: 22px; }
                 }
                 VerticalLayout {
                     alignment: center;
-                    spacing: 6px;
-                    Text {
-                        text: root.enabled ? "Noise removal is on" : "Noise removal is off";
-                        font-size: 17px;
-                        font-weight: 700;
-                        color: Theme.text;
-                    }
-                    Text {
-                        text: root.enabled
-                            ? "Background noise is removed before your voice reaches your apps."
-                            : "Your microphone passes through unchanged. Click to turn on.";
-                        font-size: 12px;
-                        color: Theme.text-dim;
-                        wrap: word-wrap;
+                    spacing: 1px;
+                    horizontal-stretch: 1;
+                    Text { text: "Esquie"; font-size: 19px; font-weight: 800; color: Theme.text; }
+                    Text { text: "Noise removal for your microphone"; font-size: 12px; color: Theme.text-dim; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        text: root.audio-status == AudioStatus.failed ? "Error"
+                            : root.audio-status == AudioStatus.connecting ? "Starting…"
+                            : root.audio-status == AudioStatus.disconnected ? "Reconnecting…"
+                            : root.audio-status == AudioStatus.no-microphone ? "No microphone"
+                            : root.audio-status == AudioStatus.no-route ? "Mic unavailable"
+                            : !root.enabled ? "Bypassed"
+                            : "Active";
+                        tint: root.audio-status == AudioStatus.failed
+                                || root.audio-status == AudioStatus.no-microphone
+                                || root.audio-status == AudioStatus.no-route ? Theme.bad
+                            : root.audio-status != AudioStatus.ready || !root.enabled ? Theme.warn
+                            : Theme.good;
                     }
                 }
             }
-            GridLayout {
-                spacing-horizontal: 12px;
-                spacing-vertical: 10px;
-                Row {
-                    Label { text: "Mic"; vertical-alignment: center; }
-                    Meter { level: root.in-level; color: Theme.text-dim; }
-                }
-                Row {
-                    Label { text: "Output"; vertical-alignment: center; }
-                    Meter { level: root.out-level; color: root.enabled ? Theme.good : Theme.text-dim; }
-                }
-            }
-        }
 
-        // Settings
-        Card {
-            VerticalLayout {
-                spacing: 8px;
-                Label { text: "MICROPHONE"; }
-                ComboBox {
-                    model: root.mics;
-                    enabled: root.has-mic;
-                    current-index <=> root.mic-index;
-                    selected => { root.mic-selected(self.current-index); }
+            HorizontalLayout {
+                Button {
+                    text: root.settings-open ? "Back to microphone" : "Settings";
+                    clicked => { root.settings-open = !root.settings-open; }
                 }
             }
-            VerticalLayout {
-                spacing: 8px;
-                HorizontalLayout {
-                    Label { text: "STRENGTH"; horizontal-stretch: 1; }
-                    Text {
-                        text: root.strength >= 99.5 ? "Maximum" : Math.round(root.strength) + "%";
-                        font-size: 12px;
-                        font-weight: 700;
-                        color: root.enabled ? Theme.accent : Theme.text-dim;
-                    }
-                }
-                Slider {
-                    minimum: 0;
-                    maximum: 100;
-                    value <=> root.strength;
-                    enabled: root.enabled;
-                    changed(v) => { root.strength-changed(v); }
+
+            if root.install-prompt: Card {
+                title: "Install Esquie?";
+                subtitle: "Keep a copy in a permanent location and add it to your application menu. You can also do this later in Settings.";
+                Button {
+                    text: "Install…"; primary: true;
+                    clicked => { root.settings-open = true; root.install-prompt = false; }
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    Chip {
-                        text: "Natural";
-                        enabled: root.enabled;
-                        selected: Math.abs(root.strength - 30) < 0.5;
-                        clicked => { root.set-strength(30); }
-                    }
-                    Chip {
-                        text: "Balanced";
-                        enabled: root.enabled;
-                        selected: Math.abs(root.strength - 65) < 0.5;
-                        clicked => { root.set-strength(65); }
-                    }
-                    Chip {
-                        text: "Maximum";
-                        enabled: root.enabled;
-                        selected: root.strength >= 99.5;
-                        clicked => { root.set-strength(100); }
-                    }
-                }
-                Text {
-                    text: "Lower strength keeps some room sound and can sound more natural.";
-                    font-size: 11px;
-                    color: Theme.text-dim;
-                    wrap: word-wrap;
+                    Button { text: "Not now"; clicked => { root.dismiss-install-prompt(false); } }
+                    Button { text: "Don't ask again"; clicked => { root.dismiss-install-prompt(true); } }
                 }
             }
-            OptionRow {
-                title: "Extra cleanup";
-                description: "Removes leftover noise more aggressively. Turn off if your voice sounds muffled.";
-                enabled: root.enabled;
-                checked <=> root.extra-cleanup;
-                toggled(on) => { root.extra-cleanup-changed(on); }
-            }
-            OptionRow {
-                title: "Silence between words";
-                description: "Fades to silence when you're not speaking. Turn off to keep a little room sound in pauses.";
-                enabled: root.enabled;
-                checked <=> root.gate;
-                toggled(on) => { root.gate-changed(on); }
-            }
-        }
 
-        // Test
-        Card {
-            title: "Test how you sound";
-            subtitle: "Record a few seconds, then compare the original and the cleaned version.";
-
-            if root.test-mode == TestMode.recording: VerticalLayout {
-                spacing: 10px;
-                HorizontalLayout {
-                    spacing: 10px;
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 12px;
-                            height: 12px;
-                            border-radius: 6px;
-                            background: Theme.bad;
-                            opacity: 0.6 + 0.4 * Math.sin(animation-tick() / 1s * 300deg);
-                        }
-                    }
-                    Text {
-                        text: "Recording… speak normally";
-                        font-weight: 600;
-                        color: Theme.text;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: root.seconds(root.clip-length) + " / " + root.seconds(root.clip-max);
-                        font-size: 12px;
-                        color: Theme.text-dim;
-                        vertical-alignment: center;
-                    }
-                    Button {
-                        text: "Stop";
-                        icon: "stop";
-                        icon-filled: true;
-                        primary: true;
-                        tint: Theme.bad;
-                        clicked => { root.stop-test(); }
-                    }
+            if root.settings-open: Card {
+                title: "Installation and launchers";
+                subtitle: root.installation-info;
+                Label { text: "INSTALLATION DIRECTORY"; }
+                LineEdit {
+                    text <=> root.install-directory;
+                    enabled: !root.installation-busy;
+                    edited => { root.install-collision = false; root.directory-changed(self.text); }
                 }
-                Progress { value: root.clip-length / root.clip-max; tint: Theme.bad; }
-            }
-
-            if root.test-mode != TestMode.recording: HorizontalLayout {
-                spacing: 10px;
+                Text { text: "A copy named esquie will be installed here. The original file stays in place."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
                 Button {
-                    text: root.clip-length > 0 ? "Record again" : "Record a sample";
-                    icon: "record";
-                    icon-filled: true;
-                    primary: root.clip-length == 0;
-                    tint: Theme.bad;
-                    enabled: root.has-mic;
-                    horizontal-stretch: 1;
-                    clicked => { root.record(); }
+                    text: root.installation-busy ? "Working…" : "Install a copy";
+                    enabled: !root.installation-busy && root.can-copy;
+                    primary: true;
+                    clicked => { root.installation-requested(0); }
                 }
-                Button {
-                    text: root.test-mode == TestMode.monitoring ? "Stop listening" : "Listen live";
-                    icon: root.test-mode == TestMode.monitoring ? "stop" : "headphones";
-                    icon-filled: root.test-mode == TestMode.monitoring;
-                    primary: root.test-mode == TestMode.monitoring;
-                    enabled: root.has-mic;
-                    horizontal-stretch: 1;
-                    clicked => {
-                        if root.test-mode == TestMode.monitoring {
-                            root.stop-test();
-                        } else {
-                            root.monitor();
-                        }
-                    }
+                if root.install-collision: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Another file exists at " + root.collision-path + ". Replace it, or choose another directory above."; color: Theme.warn; wrap: word-wrap; }
+                    Button { text: "Replace existing installation"; enabled: !root.installation-busy; clicked => { root.installation-requested(1); } }
                 }
-            }
-
-            if root.test-error != "": Text {
-                text: root.test-error;
-                color: Theme.bad;
-                font-size: 12px;
-                wrap: word-wrap;
-            }
-
-            if root.test-mode == TestMode.monitoring: Rectangle {
-                border-radius: 10px;
-                background: Theme.warn.transparentize(0.88);
+                Button { text: "Add launcher without moving the app"; enabled: !root.installation-busy; clicked => { root.installation-requested(2); } }
                 HorizontalLayout {
-                    padding: 10px;
-                    spacing: 10px;
-                    VerticalLayout {
-                        alignment: center;
-                        Icon { icon: "headphones"; color: Theme.warn; width: 16px; height: 16px; }
-                    }
-                    Text {
-                        text: "Use headphones to avoid echo. Flip the power button to hear the difference.";
-                        font-size: 12px;
-                        color: Theme.text;
-                        wrap: word-wrap;
-                        horizontal-stretch: 1;
-                    }
+                    spacing: 8px;
+                    Button { text: "Repair launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(3); } }
+                    Button { text: "Remove launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(4); } }
+                }
+                if root.installation-message != "": Text { text: root.installation-message; color: Theme.text; wrap: word-wrap; }
+                if root.can-switch: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Your current audio session is still running. Switching to the installed copy briefly interrupts the virtual microphone."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+                    Button { text: "Switch to installed copy"; enabled: !root.installation-busy; clicked => { root.switch-installation(); } }
                 }
             }
+            if root.settings-open: Card {
+                title: "Updates";
+                subtitle: "Esquie " + root.app-version + ". Update checking and downloading will be available in a later version. No network checks run yet.";
+                OptionRow { title: "Automatic update checks"; description: "Saved preference for when update checks become available. Checks will use the network."; checked: root.automatic-checks; enabled: false; }
+                Button { text: "Check now"; enabled: false; }
+            }
 
-            if root.clip-length > 0 && root.test-mode != TestMode.recording: VerticalLayout {
-                spacing: 10px;
-                HorizontalLayout {
-                    spacing: 10px;
-                    Segmented {
-                        items: ["Original", "Cleaned"];
-                        index: root.play-cleaned ? 1 : 0;
-                        horizontal-stretch: 1;
-                        changed(i) => {
-                            root.play-cleaned = i == 1;
-                            root.play-cleaned-changed(i == 1);
-                        }
+            if !root.settings-open: VerticalLayout {
+                spacing: 14px;
+                if root.status-message != "": Rectangle {
+                    property <color> tint: root.audio-status == AudioStatus.disconnected ? Theme.warn : Theme.bad;
+                    border-radius: 12px;
+                    background: tint.transparentize(0.88);
+                    border-width: 1px;
+                    border-color: tint.transparentize(0.6);
+                    HorizontalLayout {
+                        padding: 12px;
+                        Text { text: root.status-message; color: tint; wrap: word-wrap; font-size: 13px; }
                     }
-                    Button {
-                        width: 96px;
-                        text: root.test-mode == TestMode.playing ? "Stop" : "Play";
-                        icon: root.test-mode == TestMode.playing ? "stop" : "play";
-                        icon-filled: true;
-                        primary: true;
-                        clicked => {
-                            if root.test-mode == TestMode.playing {
-                                root.stop-test();
-                            } else {
-                                root.play();
+                }
+
+                // Main switch + meters
+                Card {
+                    HorizontalLayout {
+                        spacing: 20px;
+                        VerticalLayout {
+                            alignment: center;
+                            PowerButton {
+                                on <=> root.enabled;
+                                toggled(on) => { root.enabled-changed(on); }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text {
+                                text: root.enabled ? "Noise removal is on" : "Noise removal is off";
+                                font-size: 17px;
+                                font-weight: 700;
+                                color: Theme.text;
+                            }
+                            Text {
+                                text: root.enabled
+                                    ? "Background noise is removed before your voice reaches your apps."
+                                    : "Your microphone passes through unchanged. Click to turn on.";
+                                font-size: 12px;
+                                color: Theme.text-dim;
+                                wrap: word-wrap;
                             }
                         }
                     }
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    VerticalLayout {
-                        alignment: center;
-                        horizontal-stretch: 1;
-                        Progress {
-                            value: root.test-mode == TestMode.playing ? root.clip-pos / root.clip-length : 0;
+                    GridLayout {
+                        spacing-horizontal: 12px;
+                        spacing-vertical: 10px;
+                        Row {
+                            Label { text: "Mic"; vertical-alignment: center; }
+                            Meter { level: root.in-level; color: Theme.text-dim; }
+                        }
+                        Row {
+                            Label { text: "Output"; vertical-alignment: center; }
+                            Meter { level: root.out-level; color: root.enabled ? Theme.good : Theme.text-dim; }
                         }
                     }
-                    Text {
-                        text: (root.test-mode == TestMode.playing ? root.seconds(root.clip-pos) + " / " : "")
-                            + root.seconds(root.clip-length);
-                        font-size: 12px;
-                        color: Theme.text-dim;
+                }
+
+                // Settings
+                Card {
+                    VerticalLayout {
+                        spacing: 8px;
+                        Label { text: "MICROPHONE"; }
+                        ComboBox {
+                            model: root.mics;
+                            enabled: root.has-mic;
+                            current-index <=> root.mic-index;
+                            selected => { root.mic-selected(self.current-index); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 8px;
+                        HorizontalLayout {
+                            Label { text: "STRENGTH"; horizontal-stretch: 1; }
+                            Text {
+                                text: root.strength >= 99.5 ? "Maximum" : Math.round(root.strength) + "%";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: root.enabled ? Theme.accent : Theme.text-dim;
+                            }
+                        }
+                        Slider {
+                            minimum: 0;
+                            maximum: 100;
+                            value <=> root.strength;
+                            enabled: root.enabled;
+                            changed(v) => { root.strength-changed(v); }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Chip {
+                                text: "Natural";
+                                enabled: root.enabled;
+                                selected: Math.abs(root.strength - 30) < 0.5;
+                                clicked => { root.set-strength(30); }
+                            }
+                            Chip {
+                                text: "Balanced";
+                                enabled: root.enabled;
+                                selected: Math.abs(root.strength - 65) < 0.5;
+                                clicked => { root.set-strength(65); }
+                            }
+                            Chip {
+                                text: "Maximum";
+                                enabled: root.enabled;
+                                selected: root.strength >= 99.5;
+                                clicked => { root.set-strength(100); }
+                            }
+                        }
+                        Text {
+                            text: "Lower strength keeps some room sound and can sound more natural.";
+                            font-size: 11px;
+                            color: Theme.text-dim;
+                            wrap: word-wrap;
+                        }
+                    }
+                    OptionRow {
+                        title: "Extra cleanup";
+                        description: "Removes leftover noise more aggressively. Turn off if your voice sounds muffled.";
+                        enabled: root.enabled;
+                        checked <=> root.extra-cleanup;
+                        toggled(on) => { root.extra-cleanup-changed(on); }
+                    }
+                    OptionRow {
+                        title: "Silence between words";
+                        description: "Fades to silence when you're not speaking. Turn off to keep a little room sound in pauses.";
+                        enabled: root.enabled;
+                        checked <=> root.gate;
+                        toggled(on) => { root.gate-changed(on); }
                     }
                 }
-                Text {
-                    text: "Switch while it plays. The strength setting applies to the cleaned version.";
-                    font-size: 11px;
-                    color: Theme.text-dim;
-                    wrap: word-wrap;
-                }
-            }
-        }
 
-        // Where to use it
-        Rectangle {
-            border-radius: 12px;
-            background: root.in-use ? Theme.good.transparentize(0.9) : Theme.surface-2;
-            HorizontalLayout {
-                padding: 12px;
-                spacing: 10px;
-                VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        width: 8px;
-                        height: 8px;
-                        border-radius: 4px;
-                        background: root.in-use ? Theme.good : Theme.text-dim;
+                // Test
+                Card {
+                    title: "Test how you sound";
+                    subtitle: "Record a few seconds, then compare the original and the cleaned version.";
+
+                    if root.test-mode == TestMode.recording: VerticalLayout {
+                        spacing: 10px;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 12px;
+                                    height: 12px;
+                                    border-radius: 6px;
+                                    background: Theme.bad;
+                                    opacity: 0.6 + 0.4 * Math.sin(animation-tick() / 1s * 300deg);
+                                }
+                            }
+                            Text {
+                                text: "Recording… speak normally";
+                                font-weight: 600;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: root.seconds(root.clip-length) + " / " + root.seconds(root.clip-max);
+                                font-size: 12px;
+                                color: Theme.text-dim;
+                                vertical-alignment: center;
+                            }
+                            Button {
+                                text: "Stop";
+                                icon: "stop";
+                                icon-filled: true;
+                                primary: true;
+                                tint: Theme.bad;
+                                clicked => { root.stop-test(); }
+                            }
+                        }
+                        Progress { value: root.clip-length / root.clip-max; tint: Theme.bad; }
                     }
-                }
-                Text {
-                    text: root.in-use
-                        ? "In use by " + root.users
-                        : "In your apps, choose “Esquie (noise removed)” as the microphone.";
-                    font-size: 12px;
-                    color: Theme.text;
-                    wrap: word-wrap;
-                    horizontal-stretch: 1;
-                    vertical-alignment: center;
-                }
-            }
-        }
 
-        // Startup
-        Card {
-            HorizontalLayout {
-                spacing: 12px;
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 2px;
-                    horizontal-stretch: 1;
-                    Text { text: "Start on login"; font-size: 14px; font-weight: 600; color: Theme.text; }
-                    Text {
-                        text: root.has-tray
-                            ? "Closing the window keeps Esquie running in the tray. Right-click the tray icon to quit."
-                            : "Starts Esquie when you log in.";
+                    if root.test-mode != TestMode.recording: HorizontalLayout {
+                        spacing: 10px;
+                        Button {
+                            text: root.clip-length > 0 ? "Record again" : "Record a sample";
+                            icon: "record";
+                            icon-filled: true;
+                            primary: root.clip-length == 0;
+                            tint: Theme.bad;
+                            enabled: root.has-mic;
+                            horizontal-stretch: 1;
+                            clicked => { root.record(); }
+                        }
+                        Button {
+                            text: root.test-mode == TestMode.monitoring ? "Stop listening" : "Listen live";
+                            icon: root.test-mode == TestMode.monitoring ? "stop" : "headphones";
+                            icon-filled: root.test-mode == TestMode.monitoring;
+                            primary: root.test-mode == TestMode.monitoring;
+                            enabled: root.has-mic;
+                            horizontal-stretch: 1;
+                            clicked => {
+                                if root.test-mode == TestMode.monitoring {
+                                    root.stop-test();
+                                } else {
+                                    root.monitor();
+                                }
+                            }
+                        }
+                    }
+
+                    if root.test-error != "": Text {
+                        text: root.test-error;
+                        color: Theme.bad;
                         font-size: 12px;
-                        color: Theme.text-dim;
                         wrap: word-wrap;
                     }
+
+                    if root.test-mode == TestMode.monitoring: Rectangle {
+                        border-radius: 10px;
+                        background: Theme.warn.transparentize(0.88);
+                        HorizontalLayout {
+                            padding: 10px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon { icon: "headphones"; color: Theme.warn; width: 16px; height: 16px; }
+                            }
+                            Text {
+                                text: "Use headphones to avoid echo. Flip the power button to hear the difference.";
+                                font-size: 12px;
+                                color: Theme.text;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+
+                    if root.clip-length > 0 && root.test-mode != TestMode.recording: VerticalLayout {
+                        spacing: 10px;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Segmented {
+                                items: ["Original", "Cleaned"];
+                                index: root.play-cleaned ? 1 : 0;
+                                horizontal-stretch: 1;
+                                changed(i) => {
+                                    root.play-cleaned = i == 1;
+                                    root.play-cleaned-changed(i == 1);
+                                }
+                            }
+                            Button {
+                                width: 96px;
+                                text: root.test-mode == TestMode.playing ? "Stop" : "Play";
+                                icon: root.test-mode == TestMode.playing ? "stop" : "play";
+                                icon-filled: true;
+                                primary: true;
+                                clicked => {
+                                    if root.test-mode == TestMode.playing {
+                                        root.stop-test();
+                                    } else {
+                                        root.play();
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Progress {
+                                    value: root.test-mode == TestMode.playing ? root.clip-pos / root.clip-length : 0;
+                                }
+                            }
+                            Text {
+                                text: (root.test-mode == TestMode.playing ? root.seconds(root.clip-pos) + " / " : "")
+                                    + root.seconds(root.clip-length);
+                                font-size: 12px;
+                                color: Theme.text-dim;
+                            }
+                        }
+                        Text {
+                            text: "Switch while it plays. The strength setting applies to the cleaned version.";
+                            font-size: 11px;
+                            color: Theme.text-dim;
+                            wrap: word-wrap;
+                        }
+                    }
                 }
-                VerticalLayout {
-                    alignment: center;
-                    Switch {
-                        checked <=> root.autostart;
-                        toggled => { root.autostart-changed(self.checked); }
+
+                // Where to use it
+                Rectangle {
+                    border-radius: 12px;
+                    background: root.in-use ? Theme.good.transparentize(0.9) : Theme.surface-2;
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: root.in-use ? Theme.good : Theme.text-dim;
+                            }
+                        }
+                        Text {
+                            text: root.in-use
+                                ? "In use by " + root.users
+                                : "In your apps, choose “Esquie (noise removed)” as the microphone.";
+                            font-size: 12px;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Startup
+                Card {
+                    HorizontalLayout {
+                        spacing: 12px;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            Text { text: "Start on login"; font-size: 14px; font-weight: 600; color: Theme.text; }
+                            Text {
+                                text: root.has-tray
+                                    ? "Closing the window keeps Esquie running in the tray. Right-click the tray icon to quit."
+                                    : "Starts Esquie when you log in.";
+                                font-size: 12px;
+                                color: Theme.text-dim;
+                                wrap: word-wrap;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.autostart;
+                                toggled => { root.autostart-changed(self.checked); }
+                            }
+                        }
                     }
                 }
             }

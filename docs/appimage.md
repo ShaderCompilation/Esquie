@@ -25,8 +25,10 @@ Downloads are not executable until you set the executable bit, either with
 file as program"). Run it as your normal desktop user, not with `sudo`: Esquie
 connects to your user's PipeWire session.
 
-Keep the AppImage somewhere permanent, such as `~/Applications`, before turning
-on **Start on login**: the autostart entry points at the AppImage file.
+On the first visible launch, Esquie offers to install a copy. **Not now** defers
+until a later launch; **Don't ask again** dismisses permanently. Hidden startup,
+source/development runs, and existing desktop integration do not trigger the
+offer. Installation remains available in **Settings**.
 
 `./Esquie-<version>-x86_64.AppImage --version` prints the version without
 opening a window or connecting to audio.
@@ -54,18 +56,35 @@ uses these from your system:
 
 ## Adding it to the application menu
 
-AppImages don't install launcher entries by themselves. To add one that runs
-this AppImage from where it is now:
+Open **Settings → Installation and launchers**:
 
-```sh
-./Esquie-0.1.0-x86_64.AppImage --print-launcher-entry > ~/.local/share/applications/esquie.desktop
-./Esquie-0.1.0-x86_64.AppImage --appimage-extract esquie.svg
-install -Dm644 squashfs-root/esquie.svg ~/.local/share/icons/hicolor/scalable/apps/esquie.svg
-rm -r squashfs-root
-```
+- **Install a copy** copies the AppImage to `~/.local/bin/esquie` by default.
+  Change the installation directory first to use another absolute path. A file
+  already there requires explicit replacement or a different directory. No root
+  access is needed, and the original download stays untouched.
+- **Add launcher without moving the app** uses the current persistent path.
+  Move the AppImage somewhere permanent before choosing this option.
+- **Repair launcher** repairs Esquie-owned menu entries and installs the icon.
+  **Remove launcher** removes owned menu entries; it keeps the executable and
+  startup preference. A shared icon is preserved when external launchers exist.
 
-Tools such as Gear Lever or AppImageLauncher can manage this for you instead.
-Repeat the first command after moving the AppImage.
+Launchers and icons use `XDG_DATA_HOME` (default `~/.local/share`). Existing
+integration is detected across user and system XDG application directories,
+including alternate filenames. Gear Lever, AppImageLauncher, and other external
+entries are preserved. If an external launcher already exists, Esquie avoids
+creating a duplicate; change its target through that manager after copying.
+Externally managed startup entries are also left alone.
+
+Installing does not restart audio. Owned launchers and enabled owned autostart
+entries point at the selected copy immediately, and that path is remembered
+across launches, including later runs of the original download. Choose
+**Switch to installed copy** to end the current audio session and launch the
+copy. This briefly interrupts the virtual microphone. You can also quit and
+launch the installed copy later.
+
+The command-line `--print-launcher-entry` still prints a menu entry without
+writing integration files. Existing source installations can continue to use
+`install.sh`.
 
 ## Updating
 
@@ -75,8 +94,10 @@ Updates are manual: the AppImage does not check for or download updates.
 2. Download the new AppImage and `.sha256`, and verify it as above.
 3. Make it executable and start it. If it replaces the old file at the same
    path, nothing else changes. If the file name or directory differs (new
-   versions have new names), launching it once updates the **Start on login**
-   entry to the new path; regenerate the menu entry if you added one.
+   versions have new names), use **Add launcher without moving the app** from
+   the new copy to select its path and refresh owned integration. If you used
+   **Install a copy**, install the new version into the same directory and
+   confirm replacement instead.
 4. Delete the old AppImage.
 
 Settings in `~/.config/esquie/settings` are kept across versions.
@@ -84,8 +105,11 @@ Settings in `~/.config/esquie/settings` are kept across versions.
 ## Removing
 
 Turn off **Start on login** (or delete `~/.config/autostart/esquie.desktop`),
-quit Esquie, then delete the AppImage plus any menu entry and icon you added.
-Delete `~/.config/esquie` to remove settings.
+use **Settings → Remove launcher**, then quit Esquie. Delete the installed
+`~/.local/bin/esquie` (or your chosen copy) and the original download if no
+longer needed. Remove external integration through its manager. Delete
+`~/.config/esquie` to remove settings. With custom XDG directories, use the
+corresponding config/data paths.
 
 ## FUSE troubleshooting
 
@@ -123,7 +147,9 @@ mv squashfs-root Esquie
 ~/Applications/Esquie/AppRun
 ```
 
-An extracted copy behaves like an ordinary install: **Start on login** and
-`--print-launcher-entry` point at `~/Applications/Esquie/usr/bin/esquie`.
-To update, extract the new version and replace the directory, then launch it
-once.
+An extracted copy supports **Add launcher without moving the app**. Its
+launcher and **Start on login** point at
+`~/Applications/Esquie/usr/bin/esquie`. Keep the complete directory intact;
+copying only its executable through **Install a copy** is disabled. To update,
+extract the new version and replace the directory. Select its path again from
+Settings if you moved it.
