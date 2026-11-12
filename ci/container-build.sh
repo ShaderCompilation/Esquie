@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p target/validation
+echo '{"kind":"automated","result":"failed"}' > target/validation/status.json
 bash ci/install-deps.sh --ci
 cat /etc/os-release > target/validation/os-release.txt
 source /etc/os-release
@@ -24,3 +25,4 @@ bash ci/check.sh
 target/release/esquie --version > target/validation/version.txt
 cp Cargo.lock target/validation/Cargo.lock
 sha256sum target/release/esquie > target/validation/sha256.txt
+echo '{"kind":"automated","result":"passed"}' > target/validation/status.json

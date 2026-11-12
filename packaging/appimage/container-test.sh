@@ -14,6 +14,7 @@ fi
 src=$(readlink -f "$1")
 out=$2
 mkdir -p "$out"
+echo '{"kind":"automated","result":"failed"}' > "$out/status.json"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 source /etc/os-release
@@ -70,9 +71,9 @@ install -m 755 "$src" "$appimage"
 expected=$(sed -n 's/^Esquie-\(.*\)-x86_64\.AppImage$/esquie \1/p' <<<"$(basename "$src")")
 [[ -n $expected ]] || fail "unexpected AppImage name $(basename "$src")"
 
-home=$(mktemp -d)
-export HOME=$home XDG_CONFIG_HOME=$home/config XDG_STATE_HOME=$home/state XDG_DATA_HOME=$home/data
-export XDG_RUNTIME_DIR=$home/run
+test_home=$(mktemp -d)
+export HOME=$test_home XDG_CONFIG_HOME=$test_home/config XDG_STATE_HOME=$test_home/state XDG_DATA_HOME=$test_home/data
+export XDG_RUNTIME_DIR=$test_home/run
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 
 # Containers have no FUSE: the documented fallbacks are extract-and-run and
@@ -90,10 +91,9 @@ extract=$(mktemp -d)
 (cd "$extract" && "$appimage" --appimage-extract >/dev/null)
 [[ $(env -u APPIMAGE_EXTRACT_AND_RUN "$extract/squashfs-root/AppRun" --version) == "$expected" ]] \
     || fail "extracted AppRun --version failed"
-rm -rf "$extract"
 
 # Live check against the distro's PipeWire, under a private D-Bus session.
-cat > "$home/live.sh" <<'LIVE'
+cat > "$test_home/live.sh" <<'LIVE'
 set -euo pipefail
 out=$1 appimage=$2
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -105,7 +105,7 @@ pipewire >"$out/pipewire.log" 2>&1 & pids+=($!)
 for _ in {1..100}; do [[ -S $XDG_RUNTIME_DIR/pipewire-0 ]] && break; sleep 0.1; done
 [[ -S $XDG_RUNTIME_DIR/pipewire-0 ]] || fail "PipeWire did not start"
 wireplumber >"$out/wireplumber.log" 2>&1 & pids+=($!)
-pw-loopback -m '[MONO]' --capture-props='node.name=testmic-feed' \
+pw-loopback -c 1 -m '[MONO]' --capture-props='node.name=testmic-feed node.autoconnect=false' \
     --playback-props='media.class=Audio/Source node.name=testmic node.description=Test priority.session=2500' \
     >"$out/loopback.log" 2>&1 & pids+=($!)
 
@@ -148,5 +148,18 @@ tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(PIPEWIRE|SPA|WIREPLUMBER)_' > "
 [[ ! -s $out/pipewire-env.txt ]] || fail "AppImage set PipeWire environment variables"
 echo "live check passed (pid $pid)"
 LIVE
-dbus-run-session -- timeout 90s bash "$home/live.sh" "$out" "$appimage"
+# Exercise both supported no-FUSE paths through live GUI/audio startup, not
+# just --version. The same runtime-only container and host libraries are used.
+for mode in extract-and-run extracted; do
+    mode_out="$out/$mode"
+    mkdir -p "$mode_out"
+    if [[ $mode == extracted ]]; then
+        payload="$extract/squashfs-root/AppRun"
+    else
+        payload="$appimage"
+    fi
+    dbus-run-session -- timeout 90s bash "$test_home/live.sh" "$mode_out" "$payload"
+done
+rm -rf "$extract"
+echo '{"kind":"automated","result":"passed","paths":["extract-and-run","extracted"]}' > "$out/status.json"
 echo "PASS: $PRETTY_NAME"

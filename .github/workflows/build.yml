@@ -57,3 +57,79 @@ jobs:
           name: validation-${{ matrix.id }}-x86_64
           path: target/validation/
           if-no-files-found: error
+
+  appimage-build:
+    name: Build review candidate / x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build on the oldest supported baseline and inspect payload
+        env:
+          CONTAINER_ENGINE: docker
+          CARGO_BUILD_JOBS: 2
+        run: bash packaging/appimage/build.sh
+      - name: Upload candidate and checksums for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage-candidate-x86_64
+          path: |
+            target/appimage/*.AppImage
+            target/appimage/*.AppImage.sha256
+          if-no-files-found: error
+      - name: Upload packaging evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage-build-evidence
+          path: target/appimage/evidence/
+          if-no-files-found: error
+
+  appimage-test:
+    name: Candidate runtime / ${{ matrix.image }}
+    needs: appimage-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "ubuntu:26.04", "debian:13", "fedora:44", "fedora:45", "archlinux:base"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: appimage-candidate-x86_64
+          path: target/appimage/
+      - name: Verify checksum and exercise extracted payload without FUSE
+        env:
+          CONTAINER_ENGINE: docker
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: bash packaging/appimage/test.sh "$DISTRO_IMAGE"
+      - name: Name validation evidence
+        if: always()
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: echo "EVIDENCE_ID=${DISTRO_IMAGE//[:\/]/-}" >> "$GITHUB_ENV"
+      - name: Upload candidate runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage-runtime-${{ env.EVIDENCE_ID }}
+          path: target/appimage/test/
+          if-no-files-found: error
+
+  automated-gates:
+    name: All automated release gates
+    if: always()
+    needs: [build-and-test, appimage-build, appimage-test]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every matrix entry and packaging check
+        env:
+          BUILD_RESULT: ${{ needs.build-and-test.result }}
+          PACKAGE_RESULT: ${{ needs.appimage-build.result }}
+          RUNTIME_RESULT: ${{ needs.appimage-test.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$PACKAGE_RESULT" = success
+          test "$RUNTIME_RESULT" = success

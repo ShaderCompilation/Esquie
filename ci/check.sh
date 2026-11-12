@@ -5,7 +5,11 @@ cd "$(dirname "$0")/.."
 
 cargo build --release --locked
 cargo test --release --locked
+ESQUIE_PRIVATE_BUS=1 dbus-run-session -- timeout 30s \
+    cargo test --release --locked tray::live::tray_availability -- --ignored --exact
 cargo build --release --locked --example software_smoke
+cargo build --release --locked --example audio_harness
+python3 ci/audio-integration.py --harness "${CARGO_TARGET_DIR:-target}/release/examples/audio_harness"
 
 # -displayfd reports a free display only after the server is ready. Disabling
 # GLX and explicitly choosing Slint's software renderer removes GPU dependence.
@@ -39,4 +43,4 @@ mkdir -m 700 "$smoke_dir/runtime"
 env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     DISPLAY=":$(cat "$smoke_dir/display")" XDG_RUNTIME_DIR="$smoke_dir/runtime" \
     SLINT_BACKEND=winit-software \
-    dbus-run-session -- timeout 30s target/release/examples/software_smoke
+    dbus-run-session -- timeout 30s "${CARGO_TARGET_DIR:-target}/release/examples/software_smoke"

@@ -6,6 +6,10 @@ packages. It is built on Ubuntu 24.04, the oldest supported baseline. The source
 installer remains available: `./install.sh` builds from a checkout and installs
 for the current user (see [building Esquie](building.md)).
 
+GitHub Actions artifacts are review candidates. Check [release validation and
+known limitations](releases.md) before treating a candidate as release-ready;
+real desktop and hardware checks are recorded separately from container tests.
+
 ## Download, verify, and run
 
 Download the AppImage and its `.sha256` file into the same directory, then:

@@ -16,7 +16,7 @@ case "$ID" in
             git curl ca-certificates
             libxcursor1 libxi6 libxrandr2 libxinerama1 libxkbcommon-x11-0
             libegl1 libgl1 fontconfig fonts-dejavu-core)
-        if [[ ${1:-} == --ci ]]; then packages+=(xvfb dbus-daemon); fi
+        if [[ ${1:-} == --ci ]]; then packages+=(xvfb dbus-daemon python3 pipewire pipewire-bin wireplumber); fi
         apt-get install -y --no-install-recommends "${packages[@]}"
         ;;
     fedora)
@@ -25,14 +25,14 @@ case "$ID" in
             git curl-minimal ca-certificates
             libXcursor libXi libXrandr libXinerama libxkbcommon-x11
             mesa-libEGL mesa-libGL fontconfig dejavu-sans-fonts)
-        if [[ ${1:-} == --ci ]]; then packages+=(xorg-x11-server-Xvfb dbus-daemon); fi
+        if [[ ${1:-} == --ci ]]; then packages+=(xorg-x11-server-Xvfb dbus-daemon python3 pipewire pipewire-utils wireplumber); fi
         dnf install -y --setopt=install_weak_deps=False "${packages[@]}"
         ;;
     arch)
         packages=(base-devel pkgconf clang pipewire libxkbcommon wayland libx11 libxcb
             git curl ca-certificates libxcursor libxi libxrandr libxinerama
             libxkbcommon-x11 libglvnd mesa fontconfig ttf-dejavu)
-        if [[ ${1:-} == --ci ]]; then packages+=(xorg-server-xvfb dbus); fi
+        if [[ ${1:-} == --ci ]]; then packages+=(xorg-server-xvfb dbus python pipewire-audio wireplumber); fi
         pacman -Syu --noconfirm --needed "${packages[@]}"
         ;;
     *) echo "Unsupported distro: $ID" >&2; exit 1 ;;

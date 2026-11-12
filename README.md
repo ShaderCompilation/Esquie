@@ -26,6 +26,9 @@ one is unplugged ([recovery checks](docs/phase2-validation.md)). The same
 AppImage runs against each matrix distro's own PipeWire in runtime-only
 containers ([AppImage checks](docs/phase4-validation.md)). Desktop and hardware
 coverage still needs validation.
+Automated candidate gates, separate manual records, and publication criteria
+are described in [release preparation](docs/releases.md) and the
+[Phase 5 validation record](docs/phase5-validation.md).
 
 ## AppImage
 

@@ -94,8 +94,9 @@ libraries are still required by the executable's dynamic loader.
 The workflow runs independent clean-container jobs for all six matrix entries.
 Each job installs native dependencies, installs the pinned Rust compiler, runs
 a locked release build, runs the existing automated tests plus the headless
-version regression test, and renders the production Slint UI with Winit's
-software renderer. The display check uses Xvfb with GLX disabled, an isolated
+version regression test, the tray availability regression on a private D-Bus
+session, the audio integration suite below, and renders the production Slint UI
+with Winit's software renderer. The display check uses Xvfb with GLX disabled, an isolated
 D-Bus session, and a 30-second deadline; it checks a nonblank rendered snapshot
 without starting the audio engine or tray. Containers receive no GPU devices.
 
@@ -106,8 +107,8 @@ sudo bash ci/install-deps.sh --ci
 bash ci/check.sh
 ```
 
-`--ci` adds only test infrastructure: `xvfb dbus-daemon` on Debian/Ubuntu,
-`xorg-x11-server-Xvfb dbus-daemon` on Fedora, or `xorg-server-xvfb dbus` on Arch.
+`--ci` adds test infrastructure: Xvfb, a D-Bus session daemon, Python 3, and the
+distro's PipeWire utilities and WirePlumber (`pipewire-audio` on Arch).
 The existing ignored audio tuning tests remain opt-in and need the sample
 recordings in the developer's DeepFilterNet checkout.
 
@@ -133,8 +134,36 @@ version, check log, lockfile, version output, and binary checksum.
 The distro repositories intentionally track supported updates (and Arch's
 current packages). These records identify a validation environment; they do
 not promise byte-identical builds or pin OS package repositories to snapshots.
-Wayland rendering, accessibility, real audio, and desktop/hardware checks are
+Wayland rendering, accessibility, real hardware audio, and desktop/hardware checks are
 separate validation work described in the compatibility plan.
+
+### Isolated audio integration
+
+```sh
+cargo build --release --locked --example audio_harness
+python3 ci/audio-integration.py
+```
+
+This is also a required part of `ci/check.sh`. The Python standard library is
+sufficient; no pip packages are needed. The example calls the production audio
+engine and exposes a test-only JSON command/event protocol. The test creates
+private PipeWire/WirePlumber instances and synthetic mono sources, supplies a
+known tone from fixed-format harness source processes, and records two native
+consumers. Session-manager tests recreate those sources to model hardware
+monitor device re-enumeration. It tests recovery, preference
+restoration, metadata replacement, error persistence, preview separation,
+recording/meter cleanup, and retry cancellation. It verifies actual graph
+rates/quanta using `pw-top` and finite output with the cleaning engine enabled.
+Scenarios must finish within ten seconds and Quit within one second.
+
+The suite whitelists its environment, isolates runtime/config/state/cache/data,
+disables hardware monitors, and never invokes `systemctl` or connects to desktop
+audio sockets. It requires permission to bind Unix sockets; run outside a
+sandbox that forbids socket creation. `--harness PATH` selects a different build
+directory and `--out PATH` selects the evidence directory (default:
+`target/validation/audio`). A failed or interrupted check must not be treated
+as a pass; review the overall status, all scenario results, and command exit
+status. See [Phase 5 validation](phase5-validation.md) for scope and results.
 
 ## Building the AppImage
 
@@ -192,9 +221,16 @@ the AppImage on Xvfb with the software renderer. It passes when Esquie's
 virtual microphone appears and the synthetic microphone is linked to its capture
 stream, with `libpipewire` and SPA plugins loaded from the host and no
 PipeWire variables added to Esquie's environment. Containers have no FUSE, so
-these runs use `APPIMAGE_EXTRACT_AND_RUN=1`; FUSE mounting is checked on a host.
+each run exercises both `APPIMAGE_EXTRACT_AND_RUN=1` and the manually extracted
+`AppRun` through live GUI/audio startup; FUSE mounting is checked on a host.
 Logs, package lists, PipeWire versions, and the loaded library paths are written
 to `target/appimage/test/<image>/`.
+
+GitHub Actions builds one AppImage candidate on Ubuntu 24.04, uploads it with
+its checksum and build evidence, and tests that same artifact in all six
+runtime-only containers. The aggregate **All automated release gates** job also
+requires the six source build/test jobs. Candidate uploads do not publish a
+release; see [review and manual release gates](releases.md).
 
 To update a pinned tool, change its URL in `container-build.sh` and its line in
 `tools.sha256`, using the digest published with the release, then rebuild and
