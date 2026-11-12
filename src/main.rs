@@ -104,6 +104,7 @@ fn main() -> anyhow::Result<()> {
     ui.set_strength(initial.strength);
     ui.set_extra_cleanup(initial.extra_cleanup);
     ui.set_gate(initial.gate);
+    ui.set_setup_open(!initial.setup_complete);
     ui.set_clip_max(audio::MAX_CLIP_SECS as f32);
     // Restore the window size from the previous session, if any.
     if let Some((w, h)) = initial.window_size {
@@ -112,6 +113,15 @@ fn main() -> anyhow::Result<()> {
     ui.set_autostart(autostart::is_enabled());
     let handoff = installation_ui::setup(&ui, settings.clone());
     diagnostics::setup(&ui, crashed_last_run);
+
+    {
+        let settings = settings.clone();
+        ui.on_finish_setup(move || {
+            let mut s = settings.lock().unwrap();
+            s.setup_complete = true;
+            s.save();
+        });
+    }
 
     // Later launches reach the running instance through this socket.
     let reveal = instance.map(|instance| {
@@ -132,6 +142,7 @@ fn main() -> anyhow::Result<()> {
             let settings = settings.clone();
             let _ = ui_weak.upgrade_in_event_loop(move |ui| match action {
                 tray::Action::ToggleWindow if ui.window().is_visible() => {
+                    ui.invoke_end_test();
                     // Hiding via the tray: remember the size before it goes away.
                     save_window_size(&ui, &settings);
                     let _ = ui.hide();
@@ -273,14 +284,11 @@ fn main() -> anyhow::Result<()> {
         ui.on_play_cleaned_changed(move |on| shared.play_cleaned.store(on, Ordering::Relaxed));
     }
     {
-        // Hold-to-hear-original: bypass the DSP while held, then restore the
-        // power state the UI still shows. Transient only — nothing is
-        // persisted and the tray/power UI is untouched.
+        // Original comparison belongs to the headphone preview. Connected apps
+        // keep the noise removal state shown by the main switch and tray.
         let shared = shared.clone();
-        let ui_weak = ui.as_weak();
         ui.on_bypass_hold(move |held| {
-            let restore = ui_weak.upgrade().map(|ui| ui.get_enabled()).unwrap_or(true);
-            shared.enabled.store(!held && restore, Ordering::Relaxed);
+            shared.monitor_original.store(held, Ordering::Relaxed);
         });
     }
     let send = |cmd: fn() -> Command| {
@@ -328,6 +336,7 @@ fn main() -> anyhow::Result<()> {
         let settings = settings.clone();
         ui.window().on_close_requested(move || {
             if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_end_test();
                 save_window_size(&ui, &settings);
                 if !ui.get_has_tray() {
                     let _ = slint::quit_event_loop();

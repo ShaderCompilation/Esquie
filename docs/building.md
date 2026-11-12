@@ -137,6 +137,19 @@ Wayland rendering, accessibility, real hardware audio, and desktop/hardware chec
 separate checks; synthetic audio and virtual displays do not establish hardware
 compatibility, speech quality, latency, or GPU behavior.
 
+The `ui_flow` integration test also renders the production UI directly with
+Slint's software renderer, without a display or audio services. It exercises
+navigation, setup, preset callbacks, recording/listening/comparison layouts,
+momentary bypass release, scrolling, dark/light themes, and display scaling.
+`ci/check.sh` saves its screenshots under `target/validation/ui`. To run it alone:
+
+```sh
+ESQUIE_UI_OUTPUT_DIR=target/validation/ui cargo test --release --locked --test ui_flow
+```
+
+These checks cover simulated UI input and rendering, not screen-reader behavior
+or real desktop audio.
+
 ### Isolated audio integration
 
 ```sh
@@ -154,7 +167,9 @@ monitor device re-enumeration. It tests recovery, preference
 restoration, metadata replacement, error persistence, preview separation,
 recording/meter cleanup, and retry cancellation. It verifies actual graph
 rates/quanta using `pw-top` and finite output with the cleaning engine enabled.
-Scenarios must finish within ten seconds and Quit within one second.
+Graph recovery waits are limited to ten seconds and Quit to one second. The
+recording-limit scenario allows twelve seconds to capture a full ten-second
+sample and checks that playback starts only after an explicit Play command.
 
 The suite whitelists its environment, isolates runtime/config/state/cache/data,
 disables hardware monitors, and never invokes `systemctl` or connects to desktop

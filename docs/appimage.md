@@ -25,8 +25,10 @@ Downloads are not executable until you set the executable bit, either with
 file as program"). Run it as your normal desktop user, not with `sudo`: Esquie
 connects to your user's PipeWire session.
 
-On the first visible launch, Esquie offers to install a copy. **Not now** defers
-until a later launch; **Don't ask again** dismisses permanently. Hidden startup,
+New users first choose a microphone, optionally check their sound, and select
+Esquie in their apps. After setup, Esquie can offer to install a copy from the
+Microphone view. **Not now** defers until a later launch; **Don't ask again**
+dismisses permanently. Hidden startup,
 source/development runs, and existing desktop integration do not trigger the
 offer. Installation remains available in **Settings**.
 

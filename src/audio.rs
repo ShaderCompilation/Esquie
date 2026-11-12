@@ -51,6 +51,8 @@ pub struct Shared {
     pub enabled: AtomicBool,
     /// During sample playback: play the cleaned version (true) or the original.
     pub play_cleaned: AtomicBool,
+    /// Compare the raw microphone in the live preview, without changing apps' audio.
+    pub monitor_original: AtomicBool,
     /// DeepFilterNet's post-filter ("Extra cleanup" in the UI).
     pub extra_cleanup: AtomicBool,
     /// Speech gate ("Silence between words" in the UI).
@@ -68,6 +70,7 @@ impl Shared {
         Self {
             enabled: AtomicBool::new(enabled),
             play_cleaned: AtomicBool::new(true),
+            monitor_original: AtomicBool::new(false),
             extra_cleanup: AtomicBool::new(extra_cleanup),
             gate: AtomicBool::new(gate),
             atten_db: AtomicU32::new(atten_db.to_bits()),
@@ -128,7 +131,7 @@ pub enum Command {
     Play,
     /// Play the live output to the speakers/headphones.
     Monitor,
-    /// Stop the current test. Stopping a recording plays it back.
+    /// Stop the current test, keeping the sample for explicit playback.
     Stop,
     Quit,
 }
@@ -307,6 +310,9 @@ fn pull(queue: &mut VecDeque<f32>, primed: &mut bool, out: &mut [f32], hop: usiz
 
 impl Preview {
     fn set_mode(&mut self, mode: PreviewMode, shared: &Shared) {
+        if mode != PreviewMode::Monitoring {
+            shared.monitor_original.store(false, Ordering::Relaxed);
+        }
         self.mode = mode;
         self.finished = false;
         self.queue.clear();
@@ -408,7 +414,12 @@ impl Engine {
             Shared::bump(&self.shared.out_level, &self.frame_out);
             self.queue.extend(self.frame_out.iter().copied());
             if self.preview.mode == PreviewMode::Monitoring {
-                self.preview.queue.extend(self.frame_out.iter().copied());
+                let preview_frame = if self.shared.monitor_original.load(Ordering::Relaxed) {
+                    frame
+                } else {
+                    &self.frame_out
+                };
+                self.preview.queue.extend(preview_frame.iter().copied());
             }
             start += self.hop;
         }
@@ -1479,11 +1490,7 @@ impl App {
     }
 
     fn stop(&self) {
-        if self.engine.borrow().preview.mode == PreviewMode::Recording {
-            self.play();
-        } else {
-            self.stop_preview();
-        }
+        self.stop_preview();
     }
 
     /// Ends recordings at the limit, finished playback and failed previews.
@@ -1499,8 +1506,7 @@ impl App {
             (e.preview.mode, e.preview.finished)
         };
         match (mode, finished) {
-            (PreviewMode::Recording, true) => self.play(),
-            (PreviewMode::Playing, true) => self.stop_preview(),
+            (PreviewMode::Recording | PreviewMode::Playing, true) => self.stop_preview(),
             _ => {}
         }
     }
@@ -1718,6 +1724,7 @@ mod tests {
         engine.start_recording();
         engine.push_input(&noise);
         engine.preview.mode = PreviewMode::Monitoring;
+        shared.monitor_original.store(true, Ordering::Relaxed);
         engine.push_input(&noise);
         assert!(!engine.queue.is_empty() && !engine.preview.queue.is_empty());
 
@@ -1727,12 +1734,42 @@ mod tests {
         );
         assert_eq!(engine.preview.mode, PreviewMode::Idle);
         assert_eq!(shared.preview().0, PreviewMode::Idle);
+        assert!(!shared.monitor_original.load(Ordering::Relaxed));
         assert_eq!(shared.take_levels(), (0.0, 0.0));
 
         // Nothing queued before the reset is played afterwards.
         let mut out = vec![1.0; 480];
         engine.pull_output(&mut out);
         assert!(out.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn hearing_original_does_not_bypass_the_virtual_microphone() {
+        let shared = Arc::new(Shared::new(true, 100.0, true, true));
+        let mut engine = Engine::new(shared.clone()).unwrap();
+        engine.preview.set_mode(PreviewMode::Monitoring, &shared);
+        shared.monitor_original.store(true, Ordering::Relaxed);
+        let input: Vec<f32> = (0..engine.hop)
+            .map(|i| ((i % 97) as f32 / 97.0 - 0.5) * 0.2)
+            .collect();
+        engine.push_input(&input);
+        let preview: Vec<_> = engine.preview.queue.drain(..).collect();
+        let outgoing: Vec<_> = engine.queue.drain(..).collect();
+        assert_eq!(
+            preview, input,
+            "headphone comparison should receive the original"
+        );
+        assert_ne!(outgoing, input, "apps must still receive processed audio");
+        assert!(shared.enabled.load(Ordering::Relaxed));
+
+        shared.monitor_original.store(false, Ordering::Relaxed);
+        engine.push_input(&input);
+        assert_eq!(
+            engine.preview.queue, engine.queue,
+            "releasing returns the preview to the live output"
+        );
+        engine.preview.set_mode(PreviewMode::Idle, &shared);
+        assert!(!shared.monitor_original.load(Ordering::Relaxed));
     }
 }
 

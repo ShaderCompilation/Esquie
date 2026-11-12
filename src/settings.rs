@@ -9,6 +9,7 @@ pub struct Settings {
     pub strength: f32, // 0..=100, 100 = no limit
     pub extra_cleanup: bool,
     pub gate: bool,
+    pub setup_complete: bool,
     pub install_prompt: InstallPrompt,
     pub install_directory: Option<PathBuf>,
     // Persistent handoff target; never infer it from the original download later.
@@ -36,6 +37,7 @@ impl Default for Settings {
             strength: 100.0,
             extra_cleanup: true,
             gate: true,
+            setup_complete: false,
             install_prompt: InstallPrompt::Ask,
             install_directory: None,
             installed_path: None,
@@ -64,13 +66,19 @@ impl Settings {
     }
 
     fn parse(text: &str) -> Self {
-        let mut s = Self::default();
+        // Existing installations have already chosen their audio preferences.
+        // Only a missing settings file starts the new-user setup flow.
+        let mut s = Self {
+            setup_complete: true,
+            ..Self::default()
+        };
         for line in text.lines() {
             match line.split_once('=') {
                 Some(("mic", v)) if !v.is_empty() => s.mic = Some(v.to_string()),
                 Some(("enabled", v)) => s.enabled = v != "false",
                 Some(("extra_cleanup", v)) => s.extra_cleanup = v != "false",
                 Some(("gate", v)) => s.gate = v != "false",
+                Some(("setup_complete", v)) => s.setup_complete = v != "false",
                 Some(("strength", v)) => {
                     s.strength = v
                         .parse::<f32>()
@@ -97,7 +105,7 @@ impl Settings {
                         .map(|t| t.parse::<u32>().ok())
                         .collect::<Option<Vec<_>>>()
                         .and_then(|dims| match dims.as_slice() {
-                            [w, h] => Some(((*w).clamp(400, 1000), (*h).clamp(400, 1400))),
+                            [w, h] => Some(((*w).clamp(480, 1000), (*h).clamp(480, 1400))),
                             _ => None,
                         })
                 }
@@ -121,12 +129,13 @@ impl Settings {
 
     fn serialize(&self) -> String {
         let mut text = format!(
-            "mic={}\nenabled={}\nstrength={}\nextra_cleanup={}\ngate={}\n",
+            "mic={}\nenabled={}\nstrength={}\nextra_cleanup={}\ngate={}\nsetup_complete={}\n",
             self.mic.as_deref().unwrap_or(""),
             self.enabled,
             self.strength,
             self.extra_cleanup,
-            self.gate
+            self.gate,
+            self.setup_complete
         );
         text.push_str(&format!(
             "install_prompt={}\nautomatic_checks={}\n",
@@ -189,6 +198,7 @@ mod tests {
         assert_eq!(s.strength, 37.0);
         assert_eq!(s.install_prompt, InstallPrompt::Ask);
         assert!(s.automatic_checks);
+        assert!(s.setup_complete);
         assert!(s.install_directory.is_none() && s.last_check_attempt.is_none());
     }
 
@@ -201,7 +211,7 @@ mod tests {
             automatic_checks: false,
             last_check_attempt: Some(1790000000),
             skipped_version: Some("1.2.3".into()),
-            window_size: Some((460, 740)),
+            window_size: Some((540, 780)),
             ..Settings::default()
         };
         let loaded = Settings::parse(&s.serialize());
@@ -212,6 +222,7 @@ mod tests {
         assert_eq!(loaded.last_check_attempt, s.last_check_attempt);
         assert_eq!(loaded.skipped_version, s.skipped_version);
         assert_eq!(loaded.window_size, s.window_size);
+        assert_eq!(loaded.setup_complete, s.setup_complete);
         assert!(loaded.enabled);
         assert_eq!(
             Settings::parse("install_prompt=later").install_prompt,
@@ -238,10 +249,26 @@ mod tests {
     #[test]
     fn window_size_is_clamped_to_a_sane_range() {
         let s = Settings::parse("window_size=10 9999\n");
-        assert_eq!(s.window_size, Some((400, 1400)));
+        assert_eq!(s.window_size, Some((480, 1400)));
         assert_eq!(
             Settings::parse("window_size=1000 400").window_size,
-            Some((1000, 400))
+            Some((1000, 480))
         );
+        assert_eq!(
+            Settings::parse("window_size=420 740").window_size,
+            Some((480, 740))
+        );
+    }
+
+    #[test]
+    fn setup_progress_survives_other_preference_saves() {
+        let fresh = Settings::default();
+        assert!(!fresh.setup_complete);
+        assert!(!Settings::parse(&fresh.serialize()).setup_complete);
+        let complete = Settings {
+            setup_complete: true,
+            ..fresh
+        };
+        assert!(Settings::parse(&complete.serialize()).setup_complete);
     }
 }

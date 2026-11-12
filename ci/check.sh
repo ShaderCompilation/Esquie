@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cargo build --release --locked
-cargo test --release --locked
+ESQUIE_UI_OUTPUT_DIR="${CARGO_TARGET_DIR:-target}/validation/ui" cargo test --release --locked
 ESQUIE_PRIVATE_BUS=1 dbus-run-session -- timeout 30s \
     cargo test --release --locked tray::live::tray_availability -- --ignored --exact
 cargo build --release --locked --example software_smoke

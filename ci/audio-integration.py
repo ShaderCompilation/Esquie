@@ -139,13 +139,13 @@ wireplumber.profiles = { main = {
             assert predicate(), self.state
             time.sleep(0.05)
 
-    def check(self, name, action):
+    def check(self, name, action, seconds=10):
         start = time.monotonic()
         result = {"scenario": name, "result": "failed"}
         self.results.append(result)
         try:
             action()
-            assert time.monotonic() - start < 10, "scenario exceeded the ten-second recovery budget"
+            assert time.monotonic() - start < seconds, f"scenario exceeded its {seconds}-second budget"
             result["result"] = "passed"
             print(f"PASS: {name}", flush=True)
         finally:
@@ -352,12 +352,27 @@ wireplumber.profiles = { main = {
             self.command("record")
             self.wait(lambda: self.snapshot()["length"] > 0.5, "production preview records input")
             self.command("stop")
+            self.wait(lambda: self.snapshot()["mode"] == "Idle", "recording stops without playback")
+            assert self.snapshot()["length"] > 0.5, "stopping must preserve the sample"
             self.command("monitor")
             self.wait(lambda: self.state.get("preview_error") is not None,
                       "preview reports missing speaker route")
             self.stable(lambda: self.state.get("status") == "Ready")
             self.command("stop")
         self.check("two consumers receive samples; preview errors preserve readiness", audio)
+
+        def recording_limit():
+            self.command("record")
+            self.wait(lambda: self.snapshot()["mode"] == "Idle"
+                      and self.snapshot()["length"] >= 9.9,
+                      "recording reaches its limit without autoplay", seconds=12)
+            assert self.state.get("preview_error") is None, "recording must not open a speaker stream"
+            self.command("play")
+            self.wait(lambda: self.state.get("preview_error") is not None,
+                      "explicit playback attempts the speaker route")
+            self.stable(lambda: self.state.get("status") == "Ready")
+            self.command("stop")
+        self.check("recording limit preserves the clip until explicit playback", recording_limit, seconds=12)
 
         def clocks():
             for rate, quantum in ((44100, 256), (48000, 1024)):
