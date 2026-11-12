@@ -256,6 +256,7 @@ pub fn install(
     }
     let external = stage_integration(locations, inventory, &target, &mut tx)?;
     tx.commit()?;
+    refresh_icon_cache(locations);
     Ok(Outcome::Complete { target, external })
 }
 
@@ -266,6 +267,7 @@ pub fn integrate(locations: &Locations, inventory: &Inventory, target: &Path) ->
     let mut tx = Transaction::default();
     let external = stage_integration(locations, inventory, target, &mut tx)?;
     tx.commit()?;
+    refresh_icon_cache(locations);
     Ok(external)
 }
 
@@ -315,6 +317,27 @@ fn stage_integration(
     Ok(external)
 }
 
+/// GTK stops scanning an icon theme directory once `icon-theme.cache` exists,
+/// so a freshly installed icon is invisible until the cache is refreshed.
+/// Best effort: regenerate it, or drop it so lookups fall back to scanning.
+fn refresh_icon_cache(locations: &Locations) {
+    let hicolor = locations.data.join("icons/hicolor");
+    let cache = hicolor.join("icon-theme.cache");
+    if !cache.exists() {
+        return;
+    }
+    let refreshed = std::process::Command::new("gtk-update-icon-cache")
+        .arg("-q")
+        .arg("-f")
+        .arg("-t")
+        .arg(&hicolor)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !refreshed {
+        let _ = fs::remove_file(&cache);
+    }
+}
+
 /// Remove only owned user entries, and our exact embedded icon. Never binaries.
 pub fn remove_launchers(locations: &Locations, inventory: &Inventory) -> io::Result<()> {
     let mut tx = Transaction::default();
@@ -332,7 +355,11 @@ pub fn remove_launchers(locations: &Locations, inventory: &Inventory) -> io::Res
     {
         tx.remove(&icon)?;
     }
-    tx.commit()
+    tx.commit()?;
+    if removed {
+        refresh_icon_cache(locations);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -599,5 +626,24 @@ mod tests {
         inventory.kind = Kind::Extracted;
         assert!(install(&s.locations, &inventory, &s.locations.default_bin, false).is_err());
         assert!(!s.locations.default_bin.exists());
+    }
+
+    #[test]
+    fn stale_icon_cache_is_refreshed_after_install_and_removal() {
+        let s = Scratch::new();
+        let cache = s.locations.data.join("icons/hicolor/icon-theme.cache");
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(&cache, "stale cache without esquie").unwrap();
+        install(&s.locations, &s.inventory(), &s.locations.default_bin, false).unwrap();
+        // Refreshed caches list esquie; if the tool is unavailable the stale
+        // cache is removed so lookups fall back to scanning the directory.
+        let fresh = fs::read_to_string(&cache);
+        assert!(fresh.is_err() || fresh.unwrap().contains("esquie"));
+
+        let mut inventory = s.inventory();
+        inventory.launchers.retain(|l| !l.owned || !l.user);
+        remove_launchers(&s.locations, &inventory).unwrap();
+        let fresh = fs::read_to_string(&cache);
+        assert!(fresh.is_err() || !fresh.unwrap().contains("esquie"));
     }
 }
