@@ -102,6 +102,38 @@ fn microphone_sound_check_and_settings_flow() {
     ui.global::<Palette>()
         .set_color_scheme(slint::language::ColorScheme::Dark);
     ui.show().unwrap();
+    ui.set_window_visible(true);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let observed = polls.clone();
+    ui.on_refresh_preview(move || {
+        observed.fetch_add(1, Ordering::Relaxed);
+    });
+    let assert_polling = |active| {
+        slint::platform::update_timers_and_animations();
+        assert_eq!(ui.get_meters_active(), active);
+        let before = polls.load(Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(45));
+        slint::platform::update_timers_and_animations();
+        assert_eq!(polls.load(Ordering::Relaxed) > before, active);
+    };
+    assert_polling(false); // Microphone view.
+    ui.set_test_open(true);
+    assert_polling(true);
+    ui.set_settings_open(true);
+    assert_polling(false);
+    ui.set_settings_open(false);
+    assert_polling(true);
+    ui.set_window_visible(false);
+    assert_polling(false);
+    ui.set_window_visible(true);
+    assert_polling(true);
+    ui.window().set_minimized(true);
+    assert_polling(false);
+    ui.window().set_minimized(false);
+    assert_polling(true);
+    ui.set_test_open(false);
+    assert_polling(false);
+    ui.on_refresh_preview(|| {});
     ui.window()
         .dispatch_event(WindowEvent::WindowActiveChanged(true));
     ui.window().set_size(LogicalSize::new(540., 780.));

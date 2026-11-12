@@ -394,6 +394,17 @@ export component AppWindow inherits Window {
     in-out property <int> mic-index: -1;
     in-out property <bool> enabled: true;
     in-out property <float> strength: 100;
+    // Set by the host on show/hide; minimizing is tracked by the window itself.
+    in property <bool> window-visible;
+    out property <bool> meters-active: root.window-visible && !root.minimized && root.sound-check-view;
+    callback refresh-preview();
+    callback reset-meters();
+    changed meters-active => { root.reset-meters(); root.refresh-preview(); }
+    Timer {
+        interval: 33ms;
+        running: root.meters-active;
+        triggered => { root.refresh-preview(); }
+    }
     in property <float> in-level;
     in property <float> out-level;
     in property <AudioStatus> audio-status;

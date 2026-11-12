@@ -51,6 +51,7 @@ def counters(pid):
     result["threads"] = 0
     result["context_switches"] = 0
     result["thread_cpu_s"] = {}
+    result["thread_context_switches"] = {}
     for task in (root / "task").iterdir():
         try:
             stat = (task / "stat").read_text()
@@ -61,7 +62,9 @@ def counters(pid):
             result["threads"] += 1
             for line in (task / "status").read_text().splitlines():
                 if line.startswith(("voluntary_ctxt_switches:", "nonvoluntary_ctxt_switches:")):
-                    result["context_switches"] += int(line.split()[1])
+                    switches = int(line.split()[1])
+                    result["context_switches"] += switches
+                    result["thread_context_switches"][name] = result["thread_context_switches"].get(name, 0) + switches
         except FileNotFoundError:
             pass  # A short-lived helper thread ended during collection.
     for line in (root / "io").read_text().splitlines():
@@ -163,7 +166,7 @@ class PerformanceSuite(audio.Suite):
 class Benchmark:
     def __init__(self, args, suite):
         self.args, self.suite = args, suite
-        self.results, self.startups = [], []
+        self.results, self.startups, self.playbacks = [], [], []
 
     def measure(self, name, child, seconds=None, valid=lambda: True):
         seconds = self.args.seconds if seconds is None else seconds
@@ -204,7 +207,70 @@ class Benchmark:
               f"PSS {result['Pss_mib']['median']:.1f} MiB; RSS {result['Rss_mib']['median']:.1f} MiB", flush=True)
 
     def save(self):
-        dump(self.args.out / "results.json", {"states": self.results, "startup": self.startups})
+        dump(self.args.out / "results.json", {"states": self.results, "startup": self.startups,
+                                               "playback": self.playbacks})
+
+    def fast_snapshot(self):
+        # Keep normal state sampling at one second, but resolve first playback
+        # to approximately 1 ms instead of Suite.wait's 50 ms recovery polling.
+        s = self.suite
+        s.state.pop("snapshot", None)
+        s.command("snapshot")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            s.pump()
+            if "snapshot" in s.state:
+                return s.state["snapshot"]
+            time.sleep(0.001)
+        raise AssertionError("playback snapshot timed out")
+
+    def time_playback(self, name):
+        s = self.suite
+        before = counters(s.engine.pid)
+        start = time.monotonic()
+        s.command("play")
+        while time.monotonic() - start < 5:
+            snapshot = self.fast_snapshot()
+            assert s.state.get("preview_error") is None, s.state
+            if snapshot["mode"] == "Playing" and snapshot["position"] > 0:
+                break
+        else:
+            raise AssertionError("playback did not produce samples")
+        delay = 1000 * (time.monotonic() - start)
+        after = counters(s.engine.pid)
+        row = {"play": name, "command_to_samples_ms": delay,
+               "memory_before": before, "memory_after": after}
+        self.playbacks.append(row)
+        self.save()
+        print(f"PLAYBACK {name}: {delay:.1f} ms command to processed samples", flush=True)
+
+    def playback_trials(self):
+        # Fresh engines distinguish the first cleaned play from subsequent
+        # plays without pretending that process RSS isolates a model's heap.
+        s = self.suite
+        s.start_engine()
+        s.start_server()
+        s.mic_b = s.mic("mic_b")
+        s.ready("mic_b")
+        s.run("pw-cli", "create-node", "adapter",
+              "{ factory.name=support.null-audio-sink node.name=performance-speaker "
+              "media.class=Audio/Sink audio.position=[ FL FR ] object.linger=true }")
+        s.wait(lambda: s.default("default.audio.sink") == "performance-speaker", "private speaker")
+        for repeat in range(self.args.playback_runs):
+            if repeat:
+                s.start_engine()
+                s.ready("mic_b")
+            s.command("record")
+            s.wait(lambda: s.snapshot()["length"] >= 1, "one-second recording")
+            s.command("stop")
+            s.wait(lambda: s.snapshot()["mode"] == "Idle", "recording stopped")
+            self.time_playback(f"first-{repeat}")
+            s.command("stop")
+            s.wait(lambda: s.snapshot()["mode"] == "Idle", "first playback stopped")
+            self.time_playback(f"repeat-{repeat}")
+            s.command("stop")
+            s.quit()
+        (self.args.out / "audio-clock.txt").write_text(s.run("pw-top", "-b", "-n", "2").stdout)
 
     def audio_states(self):
         s = self.suite
@@ -240,8 +306,7 @@ class Benchmark:
                      valid=lambda: ready() and s.snapshot()["mode"] == "Recording")
         s.wait(lambda: s.snapshot()["mode"] == "Idle", "full ten-second clip", seconds=5)
         assert s.snapshot()["length"] == 10.0
-        s.command("play")
-        s.wait(lambda: s.snapshot()["mode"] == "Playing" and s.snapshot()["position"] > 0, "playback")
+        self.time_playback("first-cleaned")
         self.measure("audio-cleaned-playback", s.engine, seconds=6,
                      valid=lambda: ready() and s.snapshot()["mode"] == "Playing")
         s.command("stop")
@@ -349,12 +414,16 @@ def main():
     parser.add_argument("--seconds", type=float, default=20)
     parser.add_argument("--soak-seconds", type=float, default=180)
     parser.add_argument("--startup-runs", type=int, default=5)
+    parser.add_argument("--playback-only", action="store_true", help="measure first/repeat playback on fresh engines")
+    parser.add_argument("--playback-runs", type=int, default=5)
     parser.add_argument("--gui", action="store_true", help="also launch the production app on DISPLAY (X11)")
     parser.add_argument("--gui-only", action="store_true", help="skip audio-engine measurements (requires --gui)")
     parser.add_argument("--signal", choices=("tone", "noise", "silence"), default="tone")
     parser.add_argument("--renderer", choices=("winit-software", "winit-femtovg"), default="winit-software")
     args = parser.parse_args()
     assert args.seconds >= 2 and args.soak_seconds >= 0 and args.startup_runs >= 1
+    assert args.playback_runs >= 1
+    assert not args.playback_only or not args.gui, "--playback-only cannot be combined with --gui"
     assert not args.gui_only or args.gui, "--gui-only requires --gui"
     if args.gui:
         assert shutil.which("dbus-daemon"), "--gui requires dbus-daemon for a private session bus"
@@ -385,7 +454,9 @@ def main():
         with tempfile.TemporaryDirectory(prefix="esquie-perf-", dir="/tmp") as private:
             try:
                 suite.setup(Path(private), activate_services=False)
-                if args.gui_only:
+                if args.playback_only:
+                    benchmark.playback_trials()
+                elif args.gui_only:
                     # Bootstrap using the same client-before-manager order as
                     # the audio integration suite, then remove the test engine.
                     suite.start_engine()

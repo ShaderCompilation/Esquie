@@ -384,6 +384,29 @@ wireplumber.profiles = { main = {
             self.command("stop")
         self.check("recording limit preserves the clip until explicit playback", recording_limit, seconds=12)
 
+        def playback_comparison():
+            self.run("pw-cli", "create-node", "adapter",
+                     "{ factory.name=support.null-audio-sink node.name=test-speaker "
+                     "media.class=Audio/Sink audio.position=[ FL FR ] object.linger=true }")
+            self.wait(lambda: self.default("default.audio.sink") == "test-speaker", "test speaker")
+            self.command("record")
+            self.wait(lambda: self.snapshot()["mode"] == "Recording"
+                      and self.snapshot()["length"] >= 2, "comparison sample")
+            self.command("stop")
+            self.wait(lambda: self.snapshot()["mode"] == "Idle", "comparison recording stopped")
+            self.command("play_cleaned", value=False)
+            self.command("play")
+            self.wait(lambda: self.snapshot()["position"] > 0, "original sample playing")
+            self.command("play_cleaned", value=True)
+            self.wait(lambda: self.snapshot()["position"] > 0.3, "cleaned comparison playing")
+            self.command("play_cleaned", value=False)
+            self.wait(lambda: self.snapshot()["mode"] == "Idle", "playback ends without a periodic tick")
+            assert self.state.get("preview_error") is None, self.state
+            self.ready("mic_b")
+            assert not any(obj.get("info", {}).get("props", {}).get("node.name") == "esquie-preview"
+                           for obj in self.graph()), "finished speaker stream was not destroyed"
+        self.check("sample comparison switches and playback completion preserve live audio", playback_comparison)
+
         def clocks():
             for rate, quantum in ((44100, 256), (48000, 1024)):
                 self.run("pw-metadata", "-n", "settings", "0", "clock.force-rate", str(rate))

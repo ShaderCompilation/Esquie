@@ -8,8 +8,8 @@
 //! run. Everything tied to one server connection (core, registry, metadata,
 //! streams and their listeners) lives in a `Conn`, which is torn down and
 //! rebuilt when the server goes away. PipeWire callbacks only record what
-//! happened; a periodic tick performs teardown and retries, so no object is
-//! destroyed from inside its own callback.
+//! happened; maintenance after dispatch performs teardown and retries, so no
+//! object is destroyed from inside its own callback.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -131,6 +131,8 @@ pub enum Command {
     Play,
     /// Play the live output to the speakers/headphones.
     Monitor,
+    /// Select sample playback processing, preparing its model only when needed.
+    PlayCleaned(bool),
     /// Stop the current test, keeping the sample for explicit playback.
     Stop,
     Quit,
@@ -278,7 +280,7 @@ struct Engine {
 /// Test playback: a second model instance so a recorded sample can be heard
 /// both raw and cleaned (with the current strength) without touching the live mic.
 struct Preview {
-    cleaner: Cleaner,
+    cleaner: Option<Cleaner>,
     mode: PreviewMode,
     clip: Vec<f32>,
     pos: usize,
@@ -327,12 +329,16 @@ impl Preview {
                 pull(&mut self.queue, &mut self.primed, out, hop);
             }
             PreviewMode::Playing => {
-                self.cleaner.sync(shared);
+                if let Some(cleaner) = &mut self.cleaner {
+                    cleaner.sync(shared);
+                }
                 let cleaned = shared.play_cleaned.load(Ordering::Relaxed);
                 while self.queue.len() < out.len() && self.pos + hop <= self.clip.len() {
                     let frame = &self.clip[self.pos..self.pos + hop];
-                    // Always run the model so switching to "cleaned" mid-play is seamless.
-                    self.cleaner.process(frame, &mut self.frame);
+                    // Once initialized, keep history current for comparison switches.
+                    if let Some(cleaner) = &mut self.cleaner {
+                        cleaner.process(frame, &mut self.frame);
+                    }
                     self.queue.extend(
                         if cleaned { &self.frame[..] } else { frame }
                             .iter()
@@ -360,7 +366,7 @@ impl Engine {
         let cleaner = Cleaner::new(&shared)?;
         let hop = cleaner.buf.len();
         let preview = Preview {
-            cleaner: Cleaner::new(&shared)?,
+            cleaner: None,
             mode: PreviewMode::Idle,
             clip: Vec::with_capacity(MAX_CLIP),
             pos: 0,
@@ -469,17 +475,27 @@ impl Engine {
         self.preview.set_mode(PreviewMode::Recording, &self.shared);
     }
 
-    fn start_playing(&mut self) -> bool {
+    fn prepare_playback_cleaner(&mut self) -> Result<()> {
+        if self.preview.cleaner.is_none() {
+            self.preview.cleaner = Some(Cleaner::new(&self.shared)?);
+        }
+        Ok(())
+    }
+
+    fn start_playing(&mut self) -> Result<bool> {
         if self.preview.clip.len() < MIN_CLIP {
             self.preview.clip.clear();
             self.shared.clip_len.store(0, Ordering::Relaxed);
             self.preview.set_mode(PreviewMode::Idle, &self.shared);
-            return false;
+            return Ok(false);
+        }
+        if self.shared.play_cleaned.load(Ordering::Relaxed) {
+            self.prepare_playback_cleaner()?;
         }
         self.preview.pos = 0;
         self.shared.play_pos.store(0, Ordering::Relaxed);
         self.preview.set_mode(PreviewMode::Playing, &self.shared);
-        true
+        Ok(true)
     }
 }
 
@@ -511,8 +527,6 @@ fn format_pod(params: &[u8]) -> Result<&spa::pod::Pod> {
     spa::pod::Pod::from_bytes(params).context("could not build the audio format pod")
 }
 
-/// How often the audio thread checks timers, retries and pending teardown.
-const TICK: Duration = Duration::from_millis(50);
 /// A capture stream that has not delivered audio by then has no usable route.
 const ROUTE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -626,7 +640,7 @@ struct Conn {
     mics: RefCell<Vec<(u32, Mic)>>,
     active: RefCell<Option<String>>,
     capture_state: RefCell<CaptureState>,
-    /// Set by the preview stream's callback; handled by the tick.
+    /// Set by the preview stream's callback; handled after dispatch.
     preview_failed: RefCell<Option<String>>,
     /// System default mic (never our own virtual mic).
     system_default: RefCell<Option<String>>,
@@ -697,7 +711,7 @@ struct App {
     /// startup for the saved pick), never again on reconnects or fallbacks,
     /// so we don't fight the user changing the default elsewhere.
     default_synced: Cell<bool>,
-    /// Set from callbacks when the connection is lost; the tick tears down.
+    /// Set from callbacks when the connection is lost; maintenance tears down.
     lost: RefCell<Option<String>>,
     /// Why the server is unavailable, until a connection succeeds.
     server_error: RefCell<Option<String>>,
@@ -837,8 +851,8 @@ impl App {
         self.set_users(Vec::new());
     }
 
-    /// Periodic work, run outside PipeWire callbacks.
-    fn tick(self: &Rc<Self>) {
+    /// Run outside PipeWire callbacks, after dispatch or a retry/route deadline.
+    fn maintain(self: &Rc<Self>) {
         let now = Instant::now();
         let lost = self.lost.take();
         if let Some(reason) = lost {
@@ -856,6 +870,23 @@ impl App {
             self.check_preview(&conn);
         }
         self.update_status(now);
+    }
+
+    /// Sleep until an event or the earliest outstanding deadline. No recurring
+    /// maintenance wakeup is needed for a healthy stream or an absent microphone.
+    fn next_deadline(&self) -> Option<Instant> {
+        let reconnect = self.reconnect.borrow().due;
+        let capture = self.capture_retry.borrow().due;
+        let route = self.current().and_then(|conn| {
+            if !conn.synced.get() || capture.is_some() {
+                return None;
+            }
+            match *conn.capture_state.borrow() {
+                CaptureState::Waiting(since) => Some(since + ROUTE_TIMEOUT),
+                _ => None,
+            }
+        });
+        [reconnect, capture, route].into_iter().flatten().min()
     }
 
     fn check_capture(&self, conn: &Conn, now: Instant) {
@@ -1469,8 +1500,35 @@ impl App {
             return;
         };
         self.preview_error(None);
-        if self.engine.borrow_mut().start_playing() && !self.ensure_preview_stream(&conn) {
+        let result = self.engine.borrow_mut().start_playing();
+        match result {
+            Ok(true) if !self.ensure_preview_stream(&conn) => self.stop_preview(),
+            Err(e) => {
+                self.stop_preview();
+                self.preview_error(Some(format!("Could not prepare cleaned playback: {e:#}")));
+            }
+            _ => {}
+        }
+    }
+
+    fn play_cleaned(&self, cleaned: bool) {
+        self.engine
+            .borrow()
+            .shared
+            .play_cleaned
+            .store(cleaned, Ordering::Relaxed);
+        let result = {
+            let mut engine = self.engine.borrow_mut();
+            if cleaned && engine.preview.mode == PreviewMode::Playing {
+                engine.prepare_playback_cleaner()
+            } else {
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
             self.stop_preview();
+            self.preview_error(Some(format!("Could not prepare cleaned playback: {e:#}")));
+            return;
         }
     }
 
@@ -1565,30 +1623,37 @@ pub fn run(
 
     // Commands work whether or not we're connected; Quit leaves the loop
     // immediately, which also cancels any pending retry.
-    let ml = mainloop.downgrade();
+    let quitting = Rc::new(Cell::new(false));
+    let quit = quitting.clone();
     let st = app.clone();
     let _commands = commands.attach(mainloop.loop_(), move |cmd| match cmd {
         Command::SelectMic(name) => st.select_mic(name),
         Command::Record => st.record(),
         Command::Play => st.play(),
         Command::Monitor => st.monitor(),
+        Command::PlayCleaned(cleaned) => st.play_cleaned(cleaned),
         Command::Stop => st.stop(),
         Command::Quit => {
-            if let Some(ml) = ml.upgrade() {
-                ml.quit();
-            }
+            quit.set(true);
         }
     });
-
-    let st = app.clone();
-    let ticker = mainloop.loop_().add_timer(move |_| st.tick());
-    ticker.update_timer(Some(TICK), Some(TICK));
 
     // Spans the whole audio run loop, including reconnects.
     let _run_span = info_span!("audio_run").entered();
     app.update_status(Instant::now());
     app.connect();
-    mainloop.run();
+    while !quitting.get() {
+        app.maintain();
+        let timeout = match app.next_deadline() {
+            // PipeWire's poll timeout truncates to milliseconds. Round up so
+            // a sub-millisecond remainder cannot spin until the deadline.
+            Some(due) => pw::loop_::Timeout::Finite(
+                due.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            ),
+            None => pw::loop_::Timeout::Infinite,
+        };
+        mainloop.loop_().iterate(timeout);
+    }
 
     if let Some(conn) = app.conn.take() {
         conn.teardown();
@@ -1712,6 +1777,51 @@ mod tests {
         b.reset();
         b.schedule(t0);
         assert_eq!(b.due, Some(t0 + Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn playback_cleaner_is_lazy_and_reused() {
+        let shared = Arc::new(Shared::new(true, 100.0, true, true));
+        let mut engine = Engine::new(shared.clone()).unwrap();
+        assert!(engine.preview.cleaner.is_none());
+        engine.start_recording();
+        assert!(
+            !engine.start_playing().unwrap(),
+            "empty clips do not load a model"
+        );
+        assert!(engine.preview.cleaner.is_none());
+
+        let input: Vec<f32> = (0..MIN_CLIP)
+            .map(|i| ((i % 97) as f32 / 97.0 - 0.5) * 0.2)
+            .collect();
+        engine.start_recording();
+        engine.push_input(&input);
+        assert!(
+            engine.preview.cleaner.is_none(),
+            "recording uses only the live cleaner"
+        );
+        shared.play_cleaned.store(false, Ordering::Relaxed);
+        assert!(engine.start_playing().unwrap());
+        let mut out = vec![0.0; engine.hop];
+        engine.preview.fill(&mut out, &shared, engine.hop);
+        assert_eq!(out, input[..engine.hop]);
+        assert!(
+            engine.preview.cleaner.is_none(),
+            "original playback needs no model"
+        );
+
+        // The comparison command prepares the model before changing the flag.
+        engine.prepare_playback_cleaner().unwrap();
+        shared.play_cleaned.store(true, Ordering::Relaxed);
+        engine.preview.fill(&mut out, &shared, engine.hop);
+        assert_ne!(out, input[engine.hop..2 * engine.hop]);
+        let buffer = engine.preview.cleaner.as_ref().unwrap().buf.as_ptr();
+        engine.clear_audio();
+        assert!(engine.start_playing().unwrap());
+        assert_eq!(
+            engine.preview.cleaner.as_ref().unwrap().buf.as_ptr(),
+            buffer
+        );
     }
 
     #[test]

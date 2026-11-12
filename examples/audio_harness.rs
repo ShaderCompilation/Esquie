@@ -149,6 +149,7 @@ fn main() -> anyhow::Result<()> {
             "record" => Some(Command::Record),
             "play" => Some(Command::Play),
             "monitor" => Some(Command::Monitor),
+            "play_cleaned" => Some(Command::PlayCleaned(value["value"].as_bool().unwrap())),
             "stop" => Some(Command::Stop),
             "enabled" => {
                 shared

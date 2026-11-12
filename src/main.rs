@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         instance.serve(move || {
             let _ = ui_weak.upgrade_in_event_loop(|ui| {
-                let _ = ui.show();
+                let _ = show_window(&ui);
             });
         })
     });
@@ -145,10 +145,11 @@ fn main() -> anyhow::Result<()> {
                     ui.invoke_end_test();
                     // Hiding via the tray: remember the size before it goes away.
                     save_window_size(&ui, &settings);
+                    ui.set_window_visible(false);
                     let _ = ui.hide();
                 }
                 tray::Action::ToggleWindow | tray::Action::ShowWindow => {
-                    let _ = ui.show();
+                    let _ = show_window(&ui);
                     ui.invoke_consider_install_prompt();
                 }
                 tray::Action::SetEnabled(on) => {
@@ -280,8 +281,10 @@ fn main() -> anyhow::Result<()> {
         });
     }
     {
-        let shared = shared.clone();
-        ui.on_play_cleaned_changed(move |on| shared.play_cleaned.store(on, Ordering::Relaxed));
+        let tx = cmd_tx.clone();
+        ui.on_play_cleaned_changed(move |on| {
+            let _ = tx.send(Command::PlayCleaned(on));
+        });
     }
     {
         // Original comparison belongs to the headphone preview. Connected apps
@@ -302,30 +305,43 @@ fn main() -> anyhow::Result<()> {
     ui.on_monitor(send(|| Command::Monitor));
     ui.on_stop_test(send(|| Command::Stop));
 
-    // Meters and test progress, ~30 fps. Meters fall off gently.
-    let meter_timer = slint::Timer::default();
     {
         let ui_weak = ui.as_weak();
         let shared = shared.clone();
-        meter_timer.start(
-            slint::TimerMode::Repeated,
-            Duration::from_millis(33),
-            move || {
-                let Some(ui) = ui_weak.upgrade() else { return };
-                let (i, o) = shared.take_levels();
+        ui.on_reset_meters(move || {
+            shared.take_levels();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_in_level(0.0);
+                ui.set_out_level(0.0);
+            }
+        });
+    }
+
+    // The Slint timer runs only while the sound check is visible. Navigation
+    // and window visibility also request a refresh, clearing stale meter peaks.
+    {
+        let ui_weak = ui.as_weak();
+        let shared = shared.clone();
+        ui.on_refresh_preview(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let (i, o) = shared.take_levels();
+            if ui.get_meters_active() {
                 ui.set_in_level(to_meter(i).max(ui.get_in_level() * 0.85));
                 ui.set_out_level(to_meter(o).max(ui.get_out_level() * 0.85));
-                let (mode, clip, pos) = shared.preview();
-                ui.set_test_mode(match mode {
-                    PreviewMode::Idle => TestMode::Idle,
-                    PreviewMode::Recording => TestMode::Recording,
-                    PreviewMode::Playing => TestMode::Playing,
-                    PreviewMode::Monitoring => TestMode::Monitoring,
-                });
-                ui.set_clip_length(clip);
-                ui.set_clip_pos(pos);
-            },
-        );
+            } else {
+                ui.set_in_level(0.0);
+                ui.set_out_level(0.0);
+            }
+            let (mode, clip, pos) = shared.preview();
+            ui.set_test_mode(match mode {
+                PreviewMode::Idle => TestMode::Idle,
+                PreviewMode::Recording => TestMode::Recording,
+                PreviewMode::Playing => TestMode::Playing,
+                PreviewMode::Monitoring => TestMode::Monitoring,
+            });
+            ui.set_clip_length(clip);
+            ui.set_clip_pos(pos);
+        });
     }
 
     // With a tray, closing the window just hides it; quit from the tray menu.
@@ -337,6 +353,7 @@ fn main() -> anyhow::Result<()> {
         ui.window().on_close_requested(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.invoke_end_test();
+                ui.set_window_visible(false);
                 save_window_size(&ui, &settings);
                 if !ui.get_has_tray() {
                     let _ = slint::quit_event_loop();
@@ -348,7 +365,7 @@ fn main() -> anyhow::Result<()> {
     // `--hidden` only makes sense with a tray to get the window back from.
     // A tray that may still be starting (e.g. at login) gets a grace period.
     if !has_arg(desktop_entry::HIDDEN_FLAG) || tray.is_none() {
-        ui.show()?;
+        show_window(&ui)?;
         if !has_arg(desktop_entry::HIDDEN_FLAG) {
             ui.invoke_consider_install_prompt();
         }
@@ -379,6 +396,13 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Keep the declarative meter timer in sync with every application reveal.
+fn show_window(ui: &AppWindow) -> Result<(), slint::PlatformError> {
+    ui.show()?;
+    ui.set_window_visible(true);
+    Ok(())
+}
+
 /// Remember the current window size (in logical pixels) so the next launch
 /// starts with the same geometry.
 fn save_window_size(ui: &AppWindow, settings: &Arc<Mutex<Settings>>) {
@@ -395,7 +419,7 @@ fn reveal_without_tray_later(ui: &AppWindow) {
     slint::Timer::single_shot(TRAY_GRACE, move || {
         let Some(ui) = ui_weak.upgrade() else { return };
         if !ui.get_has_tray() && !ui.window().is_visible() {
-            let _ = ui.show();
+            let _ = show_window(&ui);
         }
     });
 }

@@ -55,14 +55,34 @@ contain roughly one sample per second from `/proc`. They include:
 - Resident memory (RSS), proportional shared memory (PSS), private dirty memory,
   swap, and thread counts, with medians, maxima, and end-minus-start differences.
   PSS apportions shared mappings; RSS counts those mappings in every process.
-- Context switches across all threads, page faults, and physical storage I/O.
-  Context switches are a scheduling proxy, not a direct count of wakeups.
+- Context switches across all threads (raw samples also group them by thread
+  name), page faults, and physical storage I/O. Context switches are a scheduling
+  proxy, not a direct count of wakeups.
 
 CPU covers only the measured process. It excludes PipeWire, the session manager,
 synthetic sources/consumers, the compositor, and the sampler. Kernel accounting
 has finite tick precision; a reported zero over a short interval is not proof of
 zero work. Preview-state assertions poll the harness once per sample and add a
 small amount of command handling. Thread-name grouping can combine helpers.
+
+The first cleaned playback also records Play-command-to-processed-samples time
+using approximately 1 ms snapshot polling. This includes command delivery, model
+preparation when needed, speaker stream setup, and the first process callback;
+it does not measure audible output latency. To compare first and repeat plays
+across five fresh engine processes without a full resource run:
+
+```sh
+python3 ci/performance.py --playback-only --signal noise \
+  --out target/validation/performance-playback
+```
+
+`--playback-runs` controls the number of fresh processes. Each records a short
+sample, then plays it twice. The before/after `/proc` counters in `playback`
+include PSS and private dirty memory for the entire process. Compare matching
+states across builds to measure retained memory savings; RSS alone does not
+isolate the allocation size of a Cleaner. Original-only playback defers the
+preview Cleaner until cleaned audio is requested; once loaded, it is retained
+for later plays and comparison switches.
 
 Startup records separately report process launch to an observed mapped X11
 window and to the production `Ready` audio log. They use approximately 10 ms
