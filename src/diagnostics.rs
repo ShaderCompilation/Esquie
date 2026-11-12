@@ -4,6 +4,7 @@
 //! nothing is uploaded or sent anywhere. The bundle is plain text for
 //! readability and attachments to issue trackers.
 
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::Result;
@@ -155,8 +156,9 @@ fn log_files() -> String {
     };
     let mut files: Vec<_> = entries
         .flatten()
+        .filter(|e| e.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|e| e.path())
-        .filter(|p| p.is_file())
+        .filter(|p| logging::is_log_file(p))
         .collect();
     files.sort(); // rotated names are date-stamped, so lexical == chronological
     if files.is_empty() {
@@ -165,16 +167,13 @@ fn log_files() -> String {
     files
         .iter()
         .map(|path| {
-            let text =
-                std::fs::read_to_string(path).unwrap_or_else(|e| format!("(unreadable: {e})"));
-            let (text, note) = if text.len() > MAX_LOG_FILE_BYTES {
-                let cut = floor_char_boundary(&text, MAX_LOG_FILE_BYTES);
-                (
-                    &text[..cut],
-                    format!("\n(truncated to {MAX_LOG_FILE_BYTES} bytes)"),
-                )
+            let (text, truncated) = std::fs::File::open(path)
+                .and_then(|mut file| read_log_tail(&mut file))
+                .unwrap_or_else(|e| (format!("(unreadable: {e})"), false));
+            let note = if truncated {
+                format!("\n(truncated to the last {MAX_LOG_FILE_BYTES} bytes)")
             } else {
-                (&text[..], String::new())
+                String::new()
             };
             format!("-- {} --\n{}{}", path.display(), text.trim_end(), note)
         })
@@ -182,17 +181,28 @@ fn log_files() -> String {
         .join("\n\n")
 }
 
-/// `str::floor_char_boundary` is still unstable; a safe stand-in that never
-/// splits inside a multi-byte character.
-fn floor_char_boundary(s: &str, up_to: usize) -> usize {
-    if up_to >= s.len() {
-        return s.len();
-    }
-    let mut i = up_to;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+/// Seek before reading, bounding both allocation and I/O even for very large
+/// daily logs. Discard any partial UTF-8 character at the start of the tail.
+fn read_log_tail(reader: &mut (impl Read + Seek)) -> io::Result<(String, bool)> {
+    let len = reader.seek(SeekFrom::End(0))?;
+    let start = len.saturating_sub(MAX_LOG_FILE_BYTES as u64);
+    reader.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    reader
+        .take(MAX_LOG_FILE_BYTES as u64)
+        .read_to_end(&mut bytes)?;
+    let skip = if start > 0 {
+        bytes
+            .iter()
+            .take_while(|byte| **byte & 0xc0 == 0x80)
+            .count()
+    } else {
+        0
+    };
+    Ok((
+        String::from_utf8_lossy(&bytes[skip..]).into_owned(),
+        start > 0,
+    ))
 }
 
 fn command_output(program: &str, args: &[&str]) -> String {
@@ -252,11 +262,27 @@ mod tests {
     }
 
     #[test]
-    fn truncation_respects_char_boundaries() {
-        let s = "aä€".repeat(100);
-        let i = floor_char_boundary(&s, 5);
-        assert!(s.is_char_boundary(i));
-        assert!(i <= 5);
+    fn log_tail_keeps_recent_errors_on_a_utf8_boundary() {
+        let text = format!(
+            "{}\nrecent crash backtrace",
+            "aä€".repeat(MAX_LOG_FILE_BYTES)
+        );
+        let (tail, truncated) = read_log_tail(&mut std::io::Cursor::new(text.as_bytes())).unwrap();
+        assert!(truncated);
+        assert!(tail.len() <= MAX_LOG_FILE_BYTES);
+        assert!(text.ends_with(&tail));
+        assert!(tail.ends_with("recent crash backtrace"));
+        assert!(!tail.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn small_log_tail_preserves_the_whole_file() {
+        for text in ["", "aä€\n"] {
+            let (tail, truncated) =
+                read_log_tail(&mut std::io::Cursor::new(text.as_bytes())).unwrap();
+            assert_eq!(tail, text);
+            assert!(!truncated);
+        }
     }
 
     #[test]

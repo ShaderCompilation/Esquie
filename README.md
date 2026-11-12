@@ -137,7 +137,10 @@ real mic ──► esquie-input (capture stream)
 
 - You can make "Esquie" your system default mic; Esquie never uses its own
   virtual mic as its input.
-- `ESQUIE_DEBUG=1` logs buffer underruns (crackles) to stderr.
+- `ESQUIE_LOG=debug` logs buffer underruns (crackles); `ESQUIE_LOG` overrides
+  `RUST_LOG`, and the default level is `info`. Logs are kept under
+  `${XDG_STATE_HOME:-~/.local/state}/esquie/logs/`. Export recent logs and crash
+  details from the Diagnostics card in Settings.
 - `cargo test --release --locked` checks that the model removes synthetic noise.
 
 ## Tuning (developers)

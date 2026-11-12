@@ -1804,7 +1804,9 @@ mod tune {
             i += 8 + u32::from_le_bytes(b[i + 4..i + 8].try_into().unwrap()) as usize;
         }
         let pcm: Vec<f32> = b[i + 8..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
             .collect();
         pcm.chunks_exact(ch).map(|f| f[0]).collect()
@@ -1946,13 +1948,13 @@ mod tune {
                     }
                     // Compare output aligned with the clean speech timeline (power, not dB averages).
                     let (mut sp_o, mut sp_g, mut pz_o, mut pz_g) = (0f64, 0f64, 0f64, 0f64);
-                    for f in 0..frames {
+                    for (f, &has_speech) in speech.iter().enumerate().take(frames) {
                         let a = f * hop + delay;
                         if a + hop > out.len() {
                             break;
                         }
                         let p = |x: &[f32]| x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
-                        if speech[f] {
+                        if has_speech {
                             sp_o += p(&out[a..a + hop]);
                             sp_g += p(&gated[a..a + hop])
                         } else {

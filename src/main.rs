@@ -47,8 +47,8 @@ fn main() -> anyhow::Result<()> {
 
     // Logging and crash capture come before anything that can fail or hang.
     // (The early-exit args above only print to stdout and never log.)
-    logging::init();
     logging::install_panic_hook();
+    let _logging_guard = logging::init();
     let crashed_last_run = logging::take_last_crash().is_some();
 
     // Follow a moved binary or AppImage. Skipped in debug builds so `cargo run`

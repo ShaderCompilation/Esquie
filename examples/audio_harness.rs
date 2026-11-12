@@ -54,7 +54,7 @@ fn source(name: &str) -> anyhow::Result<()> {
                 } else {
                     requested.min(available)
                 };
-                for sample in bytes.chunks_exact_mut(4).take(frames) {
+                for sample in bytes.as_chunks_mut::<4>().0.iter_mut().take(frames) {
                     sample.copy_from_slice(&(0.2 * phase.sin()).to_le_bytes());
                     phase =
                         (phase + std::f32::consts::TAU * 440.0 / 48000.0) % std::f32::consts::TAU;
