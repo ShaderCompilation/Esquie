@@ -394,7 +394,6 @@ mod tests {
         assert_eq!(
             left,
             vec![
-                "notes.txt".to_string(),
                 "esquie.log".to_string(),
                 "esquie.log.2026-11-07".to_string(),
                 "esquie.log.2026-11-08.backup".to_string(),
@@ -402,6 +401,7 @@ mod tests {
                 "esquie.log.2026-11-12".to_string(),
                 "esquie.log.2026-11-13".to_string(),
                 "esquie.log.notes".to_string(),
+                "notes.txt".to_string(),
             ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
