@@ -1,5 +1,7 @@
 # Esquie
 
+> Men Trip Not On Mountains; They Stumble Upon Stones.
+
 Offline, real-time noise removal for your microphone on Linux.
 
 Esquie reduces background noise before your voice reaches Discord, Zoom, OBS,
@@ -7,7 +9,7 @@ or other calling and recording apps. It creates a virtual microphone called
 **Esquie (noise removed)** that you select in your app's audio settings.
 
 Powered by [DeepFilterNet 3](https://github.com/Rikorose/DeepFilterNet), with the
-model built in. Audio is processed locally; nothing leaves your machine.
+model built in. Audio is processed locally. It's fully private, nothing leaves your machine.
 
 ## Download
 
@@ -33,7 +35,7 @@ if the download will not open. Updates are currently manual.
    [Verify the checksum](docs/appimage.md#download-verify-and-run), then allow
    the AppImage to run: in your file manager, open **Properties → Permissions**
    and enable execution (the wording varies by desktop), or run
-   `chmod +x "Esquie-<version>-x86_64.AppImage"` with the downloaded filename.
+   `chmod +x "Esquie-*-x86_64.AppImage"` with the downloaded filename.
 2. Open the AppImage as your normal desktop user and choose your real microphone.
    The setup guide can help you check your sound.
 3. In your calling or recording app, select **Esquie (noise removed)** as the
@@ -49,7 +51,7 @@ You can add Esquie to your application menu or install a per-user copy from
   decide how much background sound to keep. Fine-tune sound offers a precise
   slider, extra cleanup, and quieter pauses.
 - **Hear the difference.** Record up to ten seconds and switch between Original
-  and Cleaned playback. You can also listen live; use headphones to avoid feedback.
+  and Cleaned playback. You can also listen live, altough for this use headphones to avoid echo.
 - **Keep it handy.** With a supported system tray, closing the window keeps
   Esquie running. Without a tray, closing quits. Start on login is available
   in Settings; some compositors need their own startup configuration.
@@ -71,8 +73,8 @@ Esquie version and setup, and describe what you tried.
 
 Bug reports, feature requests, and testing on different Linux desktops and
 microphones are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md).
-Before starting a code contribution, open an issue and obtain explicit
-maintainer approval for its scope.
+Before starting a code contribution, please open an issue first to see if the feature fits the vision.
+Your code might be merged without it as well, but it might also not depending if the fature is wanted.
 
 ## License
 
