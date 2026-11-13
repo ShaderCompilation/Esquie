@@ -4,7 +4,8 @@ export { Palette } from "std-widgets.slint";
 export enum TestMode { idle, recording, playing, monitoring }
 export enum AudioStatus { connecting, disconnected, no-microphone, no-route, ready, failed }
 
-// ── Design tokens (follow the system light/dark preference) ─────────────────
+// ── Design tokens (follow the system light/dark preference, or the in-app
+// theme toggle once used) ────────────────────────────────────────────────────
 global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     out property <color> bg: dark ? #0e1015 : #f2f3f7;
@@ -51,6 +52,8 @@ component Icon inherits Path {
             + "a1.65 1.65 0 0 0 1 1.51a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06"
             + "a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09"
             + "a1.65 1.65 0 0 0-1.51 1z"
+        : icon == "sun" ? "M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10z M12 1v2 M12 21v2 M4.22 4.22l1.42 1.42 M18.36 18.36l1.42 1.42 M1 12h2 M21 12h2 M4.22 19.78l1.42-1.42 M18.36 5.64l1.42-1.42"
+        : icon == "moon" ? "M21 12.79a9 9 0 1 1-9.79-9.79a7 7 0 0 0 9.79 9.79z"
         : "";
 }
 
@@ -80,6 +83,8 @@ component Card inherits Rectangle {
 
 component Button inherits Rectangle {
     in property <string> text;
+    // Accessible name; defaults to the visible text, overridable for icon-only buttons.
+    in property <string> label: text;
     in property <string> icon;
     in property <bool> icon-filled;
     in property <bool> primary;
@@ -91,7 +96,7 @@ component Button inherits Rectangle {
     callback clicked;
     forward-focus: focus;
     accessible-role: button;
-    accessible-label: text;
+    accessible-label: label;
     accessible-enabled: enabled;
     accessible-checkable: checkable;
     accessible-checked: selected;
@@ -601,6 +606,18 @@ export component AppWindow inherits Window {
                             root.microphone-position = page.content-y;
                             root.settings-open = true;
                         }
+                    }
+                }
+                // Flips the palette scheme; Theme tokens and std widgets follow it.
+                // The explicit choice replaces the system preference until restart.
+                Button {
+                    width: 36px;
+                    height: 36px;
+                    compact: true;
+                    icon: Theme.dark ? "sun" : "moon";
+                    label: Theme.dark ? "Switch to light theme" : "Switch to dark theme";
+                    clicked => {
+                        Palette.color-scheme = Theme.dark ? ColorScheme.light : ColorScheme.dark;
                     }
                 }
             }

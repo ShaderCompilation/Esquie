@@ -448,8 +448,18 @@ fn microphone_sound_check_and_settings_flow() {
     assert!(!ui.get_settings_open());
     capture(&ui, "16-installation-suggestion");
     ui.set_install_prompt(false);
-    ui.global::<Palette>()
-        .set_color_scheme(slint::language::ColorScheme::Light);
+    // Switch to light through the in-app theme toggle (right of the header's
+    // navigation button) rather than forcing the palette from Rust, so the
+    // switch itself stays covered.
+    click(&ui, 438., 38.);
+    assert_eq!(
+        ui.global::<Palette>().get_color_scheme(),
+        slint::language::ColorScheme::Light
+    );
+    // Headless snapshots run back-to-back, so the 120ms button-background
+    // animation would otherwise still show the old theme's colors. Give it
+    // real time to finish before capturing the settled light UI.
+    std::thread::sleep(std::time::Duration::from_millis(200));
     capture(&ui, "17-light-microphone");
     ui.window()
         .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.5 });
