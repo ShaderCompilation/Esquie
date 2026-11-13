@@ -326,6 +326,7 @@ fn main() -> anyhow::Result<()> {
             let Some(ui) = ui_weak.upgrade() else { return };
             let (i, o) = shared.take_levels();
             let (live_active, ..) = shared.live_activity();
+            ui.set_live_processing_active(live_active);
             if ui.get_meters_active() {
                 ui.set_in_level(to_meter(i).max(ui.get_in_level() * 0.85));
                 ui.set_out_level(if live_active {

@@ -414,6 +414,7 @@ export component AppWindow inherits Window {
     }
     in property <float> in-level;
     in property <float> out-level;
+    in property <bool> live-processing-active;
     in property <AudioStatus> audio-status;
     in property <string> status-message; // shown in a banner when not empty
     in property <string> test-error;
@@ -878,8 +879,17 @@ export component AppWindow inherits Window {
                                     Helper { text: "Live levels"; }
                                     Label { text: "Microphone input"; }
                                     Meter { level: root.in-level; color: Theme.text-dim; }
-                                    Label { text: "Output to apps"; }
-                                    Meter { level: root.out-level; color: root.enabled ? Theme.good : Theme.text-dim; }
+                                    Label { text: "Live output"; }
+                                    if root.audio-ready && root.live-processing-active: Meter {
+                                        level: root.out-level;
+                                        color: root.enabled ? Theme.good : Theme.text-dim;
+                                    }
+                                    if root.audio-ready && !root.live-processing-active: VerticalLayout {
+                                        spacing: 4px;
+                                        Helper { text: "Waiting for an app or sound check"; font-weight: 600; }
+                                        Helper { text: "Choose Esquie in your app’s microphone settings, or use Record or Listen live."; }
+                                    }
+                                    if !root.audio-ready: Helper { text: root.connection-title; }
                                 }
                                 Helper {
                                     text: root.test-mode == TestMode.recording ? "Speak normally. Include speech and background sound."

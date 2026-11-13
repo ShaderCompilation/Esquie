@@ -95,6 +95,7 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_audio_status(AudioStatus::Ready);
     ui.set_in_level(0.4);
     ui.set_out_level(0.2);
+    ui.set_live_processing_active(true);
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_install_directory("/home/user/.local/bin".into());
     ui.set_installation_info("AppImage: /home/user/Downloads/Esquie.AppImage\n0 Esquie launchers, 0 external/system launchers.".into());
@@ -528,4 +529,35 @@ fn microphone_sound_check_and_settings_flow() {
     capture(&ui, "18-scaled-short-window");
     key(&ui, Key::End);
     capture(&ui, "18-scaled-short-bottom");
+
+    // No app names are needed for live output (recording and monitoring also
+    // supply demand). Silence is distinct from suspended processing.
+    ui.window()
+        .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
+    ui.window().set_size(LogicalSize::new(880., 800.));
+    ui.set_fine_tune_open(false);
+    ui.set_users("".into());
+    ui.set_out_level(0.);
+    ui.set_test_mode(TestMode::Idle);
+    key(&ui, Key::Home);
+    let silent = capture(&ui, "19-output-active-silence");
+    ui.set_live_processing_active(false);
+    let idle = capture(&ui, "19-output-waiting");
+    assert_ne!(silent.as_bytes(), idle.as_bytes());
+    ui.set_test_mode(TestMode::Playing);
+    capture(&ui, "19-output-playback-waiting");
+    ui.set_test_mode(TestMode::Monitoring);
+    ui.set_live_processing_active(true);
+    ui.set_out_level(0.5);
+    capture(&ui, "19-output-monitoring");
+    ui.set_enabled(false);
+    capture(&ui, "19-output-passthrough");
+    ui.set_audio_status(AudioStatus::Disconnected);
+    capture(&ui, "19-output-unavailable");
+    ui.set_audio_status(AudioStatus::Ready);
+    ui.set_live_processing_active(false);
+    ui.set_test_mode(TestMode::Idle);
+    ui.window().set_size(LogicalSize::new(480., 800.));
+    key(&ui, Key::End);
+    capture(&ui, "19-output-waiting-narrow");
 }
