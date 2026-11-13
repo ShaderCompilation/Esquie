@@ -30,7 +30,7 @@ and maintenance cost; a request is not a commitment to implement it.
 Open an issue and obtain explicit maintainer approval for the proposed scope
 before starting any code contribution, including fixes and refactors. This helps
 avoid spending time on work that does not fit the app's vision. A PR submitted
-without prior approval may be declined for that reason.
+without prior approval may still be merged, but also may just be declined for that reason.
 
 Approval agrees on a direction and scope, not guaranteed acceptance of the
 implementation. Keep the change focused, discuss scope changes in the issue,
@@ -51,6 +51,7 @@ cargo test --release --locked
 `bash ci/check.sh` runs the wider checks with the documented D-Bus, audio, and
 virtual-display tools. Keep generated output under `target/`. Do not commit
 personal notes, exported diagnostics, recordings, or build artifacts.
+Include in PR description the necessary information when applicable.
 
 ## License
 
