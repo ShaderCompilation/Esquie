@@ -54,7 +54,7 @@ uses these from your system:
 - **glibc 2.39 or newer** (Ubuntu 24.04's), which every supported distro has.
 - **FUSE** to mount the AppImage: the `fusermount3` or `fusermount` program and
   `/dev/fuse`. See [FUSE troubleshooting](#fuse-troubleshooting) if it is missing.
-- A **StatusNotifier tray** is optional, as described in the README.
+- A **StatusNotifier tray** is optional; see [tray and login behavior](usage.md#tray-and-start-on-login).
 
 ## Adding it to the application menu
 

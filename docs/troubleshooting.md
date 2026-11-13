@@ -34,7 +34,7 @@ include those details when reporting a problem.
 
 With a StatusNotifier tray, closing the window hides Esquie; use the tray menu
 to open or quit it. Without a tray, closing quits. `--hidden` hides the window
-only while a tray is available. See [tray and login behavior](../README.md#tray-and-start-on-login).
+only while a tray is available. See [tray and login behavior](usage.md#tray-and-start-on-login).
 
 After moving an AppImage, open the new copy and use **Add launcher without moving
 the app** in Settings. Update external launchers through their manager. Compositors

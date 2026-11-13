@@ -310,3 +310,28 @@ pins, including any new files that linuxdeploy adds to the payload.
 The AppImage includes these texts and its lockfile in `usr/share/doc/esquie/`.
 Payload inspection requires them. See [third-party notices](../THIRD_PARTY_NOTICES.md)
 for the embedded model, AppImage runtime, and corresponding-source requirements.
+
+## Audio pipeline and source layout
+
+```
+real mic ──► esquie-input (capture stream)
+                 │  48 kHz mono, 10 ms frames
+                 ▼
+            high-pass filter (80 Hz, removes rumble/hum)
+                 │
+                 ▼
+            DeepFilterNet 3 (tract, CPU)
+                 │
+                 ▼
+            speech gate (driven by the model's speech estimate)
+                 │
+                 ▼
+            small buffer ──► "esquie" (Audio/Source) ──► your apps
+```
+
+- `src/audio.rs`: PipeWire streams, mic discovery, DeepFilterNet processing.
+- `src/dsp.rs`: high-pass filter, speech gate, and the developer-tuned constants.
+- `src/main.rs`: Slint UI wiring. `ui/app.slint`: the window.
+
+For resource-usage measurement methods and their limitations, see
+[Measuring resource usage](performance.md).
