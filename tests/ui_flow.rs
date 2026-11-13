@@ -376,19 +376,77 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_setup_open(true);
     ui.set_setup_step(0);
     capture(&ui, "10-setup-microphone");
-    click(&ui, 240., 410.);
+    click(&ui, 240., 558.);
     assert!(ui.get_test_open(), "setup opens optional sound check");
     capture(&ui, "10-setup-sound-check");
-    click(&ui, 400., 38.);
+    let before = stops.load(Ordering::Relaxed);
+    click(&ui, 240., 558.);
+    assert!(stops.load(Ordering::Relaxed) > before);
     assert!(!ui.get_test_open());
     assert_eq!(ui.get_setup_step(), 2);
+    capture(&ui, "11-setup-before-back");
+    click(&ui, 210., 38.);
+    assert_eq!(ui.get_setup_step(), 1);
+    assert!(ui.get_test_open());
+    key(&ui, Key::Escape);
+    assert_eq!(ui.get_setup_step(), 0);
+    assert!(!ui.get_test_open());
+    capture(&ui, "10-setup-return-microphone");
+    click(&ui, 240., 506.);
+    assert_eq!(ui.get_setup_step(), 2);
+    key(&ui, Key::Escape);
+    assert_eq!(ui.get_setup_step(), 0);
+    capture(&ui, "10-setup-skip-return");
+    click(&ui, 240., 558.);
+    capture(&ui, "10-setup-test-again");
+    click(&ui, 350., 38.);
+    assert!(ui.get_settings_open());
+    key(&ui, Key::Escape);
+    assert!(ui.get_test_open());
+    assert_eq!(ui.get_setup_step(), 1);
+    capture(&ui, "10-setup-settings-return");
+    click(&ui, 240., 558.);
     capture(&ui, "11-setup-apps");
+    for (width, height) in [(880., 640.), (480., 480.)] {
+        ui.window().set_size(LogicalSize::new(width, height));
+        for step in 0..3 {
+            ui.set_setup_step(step);
+            ui.set_test_open(step == 1);
+            capture(&ui, &format!("setup-{width}-{height}-step-{step}"));
+            if step == 1 {
+                ui.set_fine_tune_open(true);
+                capture(&ui, &format!("setup-{width}-{height}-expanded"));
+                key(&ui, Key::End);
+                capture(&ui, &format!("setup-{width}-{height}-expanded-bottom"));
+                key(&ui, Key::Home);
+                ui.set_fine_tune_open(false);
+                ui.set_test_mode(TestMode::Recording);
+                capture(&ui, &format!("setup-{width}-{height}-recording"));
+                ui.set_test_mode(TestMode::Playing);
+                capture(&ui, &format!("setup-{width}-{height}-playing"));
+                ui.set_test_mode(TestMode::Idle);
+            }
+        }
+    }
+    ui.set_setup_step(0);
+    ui.set_audio_status(AudioStatus::NoMicrophone);
+    capture(&ui, "setup-small-no-microphone");
+    let microphones = ui.get_mics();
+    ui.set_mics(ModelRc::new(VecModel::from(vec![
+        "A very long microphone name with manufacturer, device model, and audio profile".into(),
+    ])));
+    capture(&ui, "setup-small-long-microphone");
+    ui.set_mics(microphones);
+    ui.set_audio_status(AudioStatus::Ready);
+    ui.set_setup_step(2);
+    ui.window().set_size(LogicalSize::new(480., 600.));
+    capture(&ui, "11-setup-finish");
     let finishes = Arc::new(AtomicUsize::new(0));
     let finished = finishes.clone();
     ui.on_finish_setup(move || {
         finished.fetch_add(1, Ordering::Relaxed);
     });
-    click(&ui, 240., 375.);
+    click(&ui, 240., 558.);
     assert!(!ui.get_setup_open());
     assert_eq!(finishes.load(Ordering::Relaxed), 1);
     for (name, status) in [

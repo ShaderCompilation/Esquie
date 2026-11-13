@@ -308,6 +308,7 @@ component SoundControls inherits Card {
     in-out property <bool> gate;
     in-out property <bool> details-open;
     in property <bool> enabled;
+    in property <bool> setup-mode;
     callback strength-changed(float);
     callback extra-cleanup-changed(bool);
     callback gate-changed(bool);
@@ -347,7 +348,7 @@ component SoundControls inherits Card {
             : "Custom strength: " + Math.round(root.strength) + "%";
     }
     Button {
-        text: root.details-open ? "Hide fine-tuning" : "Fine-tune sound";
+        text: root.setup-mode ? (root.details-open ? "Hide sound settings" : "More sound settings") : (root.details-open ? "Hide fine-tuning" : "Fine-tune sound");
         compact: true;
         checkable: true;
         selected: root.details-open;
@@ -473,6 +474,7 @@ export component AppWindow inherits Window {
     in-out property <bool> fine-tune-open;
     callback finish-setup();
 
+    private property <int> setup-return-step: 1;
     private property <bool> microphone-view: !root.settings-open && !root.setup-open;
     private property <bool> sound-check-view: !root.settings-open && (!root.setup-open || root.test-open);
     private property <bool> wide-workspace: root.width >= 760px;
@@ -492,7 +494,7 @@ export component AppWindow inherits Window {
         : root.audio-status == AudioStatus.failed ? "Audio couldn't start"
         : !root.enabled ? "Noise removal off"
         : root.users != "" ? "In use by " + root.users
-        : "Ready — choose Esquie in your app";
+        : root.setup-open ? "Microphone ready" : "Ready — choose Esquie in your app";
     private property <string> connection-detail:
         root.audio-status == AudioStatus.connecting ? "Your microphone will be ready in a moment."
         : root.audio-status == AudioStatus.disconnected ? "Waiting for the audio server. Esquie reconnects automatically."
@@ -518,6 +520,7 @@ export component AppWindow inherits Window {
     }
     function open-test() {
         root.microphone-position = page.content-y;
+        if root.setup-open { root.fine-tune-open = false; }
         root.test-open = true;
         page.content-y = 0px;
     }
@@ -529,12 +532,31 @@ export component AppWindow inherits Window {
         } else if root.test-open {
             root.test-open = false;
             if root.setup-open {
-                root.setup-step = 2;
+                root.setup-step = 0;
                 page.content-y = 0px;
             } else {
                 page.content-y = root.microphone-position;
             }
+        } else if root.setup-open && root.setup-step == 2 {
+            root.setup-step = root.setup-return-step;
+            root.test-open = root.setup-step == 1;
+            page.content-y = 0px;
         }
+    }
+    function advance-setup() {
+        root.end-test();
+        if root.setup-step == 0 {
+            root.setup-step = 1;
+            root.open-test();
+        } else if root.setup-step == 1 {
+            root.test-open = false;
+            root.setup-return-step = 1;
+            root.setup-step = 2;
+        } else {
+            root.setup-open = false;
+            root.finish-setup();
+        }
+        page.content-y = 0px;
     }
     changed settings-open => {
         navigation.focus();
@@ -594,14 +616,22 @@ export component AppWindow inherits Window {
                     Text { text: "Esquie"; color: Theme.text; font-size: 20px; font-weight: 800; }
                     Helper { text: root.settings-open ? "Settings" : root.setup-open ? "Welcome" : "Microphone and sound check"; }
                 }
+                if root.setup-open && root.setup-step > 0 && !root.settings-open: Button {
+                    text: "Back";
+                    icon: "back";
+                    width: 90px;
+                    compact: true;
+                    height: 36px;
+                    clicked => { root.back(); }
+                }
                 navigation := Button {
                     width: 110px;
                     height: 36px;
                     compact: true;
-                    icon: root.settings-open || (root.setup-open && root.test-open) ? "back" : "gear";
-                    text: root.settings-open ? "Back" : root.setup-open && root.test-open ? "Next" : "Settings";
+                    icon: root.settings-open ? "back" : "gear";
+                    text: root.settings-open ? "Back" : "Settings";
                     clicked => {
-                        if root.settings-open || (root.setup-open && root.test-open) { root.back(); }
+                        if root.settings-open { root.back(); }
                         else {
                             root.microphone-position = page.content-y;
                             root.settings-open = true;
@@ -642,6 +672,18 @@ export component AppWindow inherits Window {
                     spacing: 16px;
                     alignment: start;
 
+                    if root.setup-open && !root.settings-open: VerticalLayout {
+                        spacing: 4px;
+                        Helper { text: "Step " + (root.setup-step + 1) + " of 3" + (root.setup-step == 1 ? " · Optional" : ""); }
+                        Text {
+                            text: root.setup-step == 0 ? "Choose your microphone" : root.setup-step == 1 ? "Test your sound" : "Use Esquie in your apps";
+                            color: Theme.text;
+                            font-size: 20px;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                            height: self.preferred-height;
+                        }
+                    }
                     Rectangle {
                         border-radius: 12px;
                         background: Theme.surface-2;
@@ -655,7 +697,7 @@ export component AppWindow inherits Window {
                             VerticalLayout {
                                 spacing: 4px;
                                 Text { text: root.connection-title; font-size: 14px; font-weight: 600; color: Theme.text; wrap: word-wrap; height: self.preferred-height; }
-                                if !root.audio-ready || !root.enabled || root.setup-open || root.users == "": Helper { text: root.connection-detail; }
+                                if !root.audio-ready || !root.enabled || (!root.setup-open && root.users == ""): Helper { text: root.connection-detail; }
                             }
                         }
                     }
@@ -751,9 +793,9 @@ export component AppWindow inherits Window {
 
 
                     if !root.settings-open && !root.test-open && root.setup-open: Card {
-                        title: root.setup-step == 2 ? "3. Use Esquie in your apps" : "1. Choose your microphone";
+                        title: root.setup-step == 2 ? "Choose Esquie in your app" : "Your microphone";
                         subtitle: root.setup-step == 2
-                            ? "Open the audio settings in your calling or recording app. Choose “Esquie (noise removed)” as its microphone."
+                            ? "Open your calling or recording app’s audio settings, then select this microphone."
                             : "Choose the microphone you normally speak into. Your audio stays on this machine.";
                         if root.setup-step != 2: VerticalLayout {
                             spacing: 14px;
@@ -770,32 +812,32 @@ export component AppWindow inherits Window {
                                 Meter { level: root.in-level; color: Theme.text-dim; }
                             }
                             Helper { text: "Speak a few words. The input meter should move."; }
-                            Button {
-                                text: "Next: test my sound";
-                                primary: true;
-                                enabled: root.audio-ready;
-                                clicked => { root.setup-step = 1; root.open-test(); }
-                            }
-                            Button { text: "Skip sound check"; clicked => { root.setup-step = 2; page.content-y = 0px; } }
                         }
                         if root.setup-step == 2: VerticalLayout {
                             spacing: 14px;
-                            Text { text: "Esquie (noise removed)"; font-size: 17px; font-weight: 700; color: Theme.accent; wrap: word-wrap; height: self.preferred-height; }
+                            Rectangle {
+                                background: Theme.surface-2;
+                                border-radius: 8px;
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+                                    Label { text: "Microphone"; }
+                                    Text { text: "Esquie (noise removed)"; font-size: 14px; font-weight: 600; color: Theme.text; wrap: word-wrap; height: self.preferred-height; }
+                                }
+                            }
                             Helper { text: "Esquie shows which apps connect. You can test and adjust your sound any time."; }
-                            Button { text: "Finish setup"; primary: true; clicked => { root.setup-open = false; root.finish-setup(); page.content-y = 0px; } }
-                            Button { text: "Back to microphone choice"; clicked => { root.setup-step = 0; page.content-y = 0px; } }
                         }
                     }
 
                     if root.microphone-view || root.sound-check-view: GridLayout {
                         spacing: 16px;
                         VerticalLayout {
-                            row: 0;
+                            row: root.setup-open ? 1 : 0;
                             col: 0;
-                            width: root.wide-workspace ? (root.width - 64px) * 0.46 : root.width - 48px;
+                            width: root.wide-workspace && !root.setup-open ? (root.width - 64px) * 0.46 : root.width - 48px;
                             spacing: 16px;
                             alignment: start;
-                            Card {
+                            if !root.setup-open || root.fine-tune-open: Card {
                                 title: "Your microphone";
                                 ComboBox {
                                     accessible-label: "Microphone";
@@ -812,6 +854,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             SoundControls {
+                                setup-mode: root.setup-open;
                                 strength <=> root.strength;
                                 extra-cleanup <=> root.extra-cleanup;
                                 gate <=> root.gate;
@@ -823,12 +866,12 @@ export component AppWindow inherits Window {
                             }
                         }
                         VerticalLayout {
-                            row: root.wide-workspace ? 0 : 1;
-                            col: root.wide-workspace ? 1 : 0;
+                            row: root.setup-open || root.wide-workspace ? 0 : 1;
+                            col: !root.setup-open && root.wide-workspace ? 1 : 0;
                             horizontal-stretch: 1;
                             alignment: start;
                             Card {
-                                title: root.setup-open ? "2. Check your sound (optional)" : "Sound check";
+                                title: "Sound check";
                                 subtitle: "Watch your live levels, then listen to compare.";
                                 VerticalLayout {
                                     spacing: 8px;
@@ -951,6 +994,23 @@ export component AppWindow inherits Window {
                         }
                     }
                     if root.status-message != "": Helper { text: root.status-message; }
+                }
+            }
+            if root.setup-open && !root.settings-open: VerticalLayout {
+                padding-left: 24px;
+                padding-right: 24px;
+                padding-top: 12px;
+                padding-bottom: 20px;
+                spacing: 8px;
+                if root.setup-step == 0: Button {
+                    text: "Skip sound check";
+                    clicked => { root.end-test(); root.setup-return-step = 0; root.setup-step = 2; page.content-y = 0px; }
+                }
+                Button {
+                    text: root.setup-step == 0 ? "Next: test my sound" : root.setup-step == 1 ? "Next: use in my apps" : "Finish setup";
+                    primary: true;
+                    enabled: root.setup-step != 0 || root.audio-ready;
+                    clicked => { root.advance-setup(); }
                 }
             }
         }
