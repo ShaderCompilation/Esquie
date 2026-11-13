@@ -79,12 +79,15 @@ the display, D-Bus, or PipeWire.
 - **Fine-tune sound**: opens the precise strength slider, **Extra cleanup**
   (suppresses leftover noise, at a possible cost to voice fidelity), and
   **Silence between words** (quiets pauses). Both switches are on by default.
-- **Test my sound**: record a sample, then explicitly play it and switch
+- **Sound check**: stays beside the microphone and cleanup controls in the wider
+  workspace, or below them in narrow windows. Live input/output meters stay
+  visible while testing; they show microphone levels, not recorded playback.
+  Record a sample, then explicitly play it and switch
   between **Original** and **Cleaned**. Recordings stop after ten seconds;
   stopping keeps the sample without playing it automatically. Fine-tuning
   applies to Cleaned playback. **Listen live** is a separate mode; use headphones
   and hold **Hear original** to compare, or hold Space/Enter while that control
-  is focused. Leaving the sound check or hiding the window stops the test.
+  is focused. Opening Settings, hiding, or minimizing the window stops the test.
   Hearing the original in live comparison affects only your headphone preview;
   connected apps keep receiving the audio selected by the Noise removal switch.
 - **Settings**: install a per-user copy, choose its directory, or add, repair,

@@ -317,7 +317,7 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
-    // The Slint timer runs only while the sound check is visible. Navigation
+    // The Slint timer runs only while live levels are visible. Navigation
     // and window visibility also request a refresh, clearing stale meter peaks.
     {
         let ui_weak = ui.as_weak();

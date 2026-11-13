@@ -139,8 +139,10 @@ compatibility, speech quality, latency, or GPU behavior.
 
 The `ui_flow` integration test also renders the production UI directly with
 Slint's software renderer, without a display or audio services. It exercises
-navigation, setup, preset callbacks, recording/listening/comparison layouts,
-momentary bypass release, scrolling, dark/light themes, and display scaling.
+navigation, setup, preset callbacks, the two-column workspace and its narrow
+layout (including the 760 px breakpoint), recording/listening/comparison layouts,
+momentary bypass release on navigation/hide/minimize, meter polling, scrolling,
+dark/light themes, and display scaling.
 `ci/check.sh` saves its screenshots under `target/validation/ui`. To run it alone:
 
 ```sh

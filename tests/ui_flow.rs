@@ -116,7 +116,11 @@ fn microphone_sound_check_and_settings_flow() {
         slint::platform::update_timers_and_animations();
         assert_eq!(polls.load(Ordering::Relaxed) > before, active);
     };
-    assert_polling(false); // Microphone view.
+    assert_polling(true); // The workspace always includes live meters.
+    ui.set_setup_open(true);
+    assert_polling(true); // The microphone-selection step also shows input.
+    ui.set_setup_step(2);
+    assert_polling(false); // The final setup instructions contain no meters.
     ui.set_test_open(true);
     assert_polling(true);
     ui.set_settings_open(true);
@@ -132,10 +136,32 @@ fn microphone_sound_check_and_settings_flow() {
     ui.window().set_minimized(false);
     assert_polling(true);
     ui.set_test_open(false);
-    assert_polling(false);
+    ui.set_setup_open(false);
+    assert_polling(true);
     ui.on_refresh_preview(|| {});
     ui.window()
         .dispatch_event(WindowEvent::WindowActiveChanged(true));
+    ui.window().set_size(LogicalSize::new(880., 640.));
+    capture(&ui, "01-workspace");
+    // Both preview actions are directly reachable without navigating away.
+    let records = Arc::new(AtomicUsize::new(0));
+    let count = records.clone();
+    ui.on_record(move || {
+        count.fetch_add(1, Ordering::Relaxed);
+    });
+    let monitors = Arc::new(AtomicUsize::new(0));
+    let count = monitors.clone();
+    ui.on_monitor(move || {
+        count.fetch_add(1, Ordering::Relaxed);
+    });
+    assert_eq!(records.load(Ordering::Relaxed), 0);
+    assert_eq!(monitors.load(Ordering::Relaxed), 0);
+    click(&ui, 550., 435.);
+    click(&ui, 760., 435.);
+    assert_eq!(records.load(Ordering::Relaxed), 1);
+    assert_eq!(monitors.load(Ordering::Relaxed), 1);
+    assert!(!ui.get_test_open());
+    assert!(!ui.get_settings_open());
     ui.window().set_size(LogicalSize::new(540., 780.));
     capture(&ui, "01-microphone");
 
@@ -164,10 +190,10 @@ fn microphone_sound_check_and_settings_flow() {
     ui.on_strength_changed(move |value| {
         changed.lock().unwrap().push(value);
     });
-    click(&ui, 260., 495.);
+    click(&ui, 260., 410.);
     assert_eq!(ui.get_strength(), 65.);
     assert_eq!(*strengths.lock().unwrap(), [65.]);
-    click(&ui, 420., 495.);
+    click(&ui, 420., 410.);
     assert_eq!(ui.get_strength(), 100.);
 
     // A round trip through Settings preserves the microphone scroll position.
@@ -197,34 +223,40 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_fine_tune_open(false);
     key(&ui, Key::Home);
 
-    // Export captures for all dynamic states and both supported widths.
-    for width in [480., 540.] {
-        ui.window().set_size(LogicalSize::new(width, 600.));
-        ui.set_test_open(true);
+    // Exercise the default size, narrow windows, and both sides of the breakpoint.
+    for width in [480., 540., 759., 760., 880.] {
+        ui.window().set_size(LogicalSize::new(width, 640.));
         ui.set_clip_length(0.);
         ui.set_test_mode(TestMode::Idle);
         capture(&ui, &format!("03-test-{width}"));
         ui.set_test_mode(TestMode::Recording);
         ui.set_clip_length(3.);
+        key(&ui, Key::End);
         let recording = capture(&ui, &format!("04-recording-{width}"));
         // The recording progress must have room below it inside the card,
         // rather than touching or overflowing the card's lower edge.
         let stride = recording.width() as usize;
-        let progress_end = (185..500)
+        let meter_x = if width >= 760. {
+            (width * 0.6) as usize
+        } else {
+            50
+        };
+        let progress_end = (90..recording.height() as usize)
             .rev()
             .find(|y| {
-                let pixel = recording.as_slice()[y * stride + 50];
+                let pixel = recording.as_slice()[y * stride + meter_x];
                 pixel.r > 200 && pixel.g < 160 && pixel.b < 160
             })
             .expect("recording progress is visible");
-        let card = recording.as_slice()[(progress_end - 10) * stride + 50];
+        let card = recording.as_slice()[(progress_end - 10) * stride + meter_x];
         let padding = (progress_end + 1..recording.height() as usize)
-            .take_while(|y| recording.as_slice()[y * stride + 50] == card)
+            .take_while(|y| recording.as_slice()[y * stride + meter_x] == card)
             .count();
         assert!(
             padding >= 12,
             "recording card must contain its progress and bottom padding"
         );
+        key(&ui, Key::Home);
         ui.set_test_mode(TestMode::Idle);
         ui.set_clip_length(10.);
         capture(&ui, &format!("05-comparison-{width}"));
@@ -251,13 +283,12 @@ fn microphone_sound_check_and_settings_flow() {
         ui.set_test_open(false);
     }
 
-    // Leaving an active sound check must stop it, including through Settings.
+    // Escape stops tests without leaving the unified workspace.
     let stops = Arc::new(AtomicUsize::new(0));
     let count = stops.clone();
     ui.on_stop_test(move || {
         count.fetch_add(1, Ordering::Relaxed);
     });
-    ui.set_test_open(true);
     ui.set_test_mode(TestMode::Recording);
     key(&ui, Key::Escape);
     assert!(!ui.get_settings_open());
@@ -265,7 +296,6 @@ fn microphone_sound_check_and_settings_flow() {
     assert_eq!(stops.load(Ordering::Relaxed), 1);
     // The meter timer may still report Idle immediately after Record was sent.
     ui.set_test_mode(TestMode::Idle);
-    ui.set_test_open(true);
     capture(&ui, "09-pending-record");
     key(&ui, Key::Escape);
     assert_eq!(
@@ -273,7 +303,6 @@ fn microphone_sound_check_and_settings_flow() {
         2,
         "navigation cancels pending audio commands too"
     );
-    ui.set_test_open(true);
     ui.set_test_mode(TestMode::Monitoring);
     ui.set_settings_open(true);
     capture(&ui, "09-settings-from-test");
@@ -283,8 +312,7 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_test_mode(TestMode::Idle);
 
     // Pointer and keyboard holds release on mouse-up, key-up, and navigation.
-    ui.window().set_size(LogicalSize::new(480., 600.));
-    ui.set_test_open(true);
+    ui.window().set_size(LogicalSize::new(880., 640.));
     ui.set_test_mode(TestMode::Monitoring);
     capture(&ui, "09-hold-ready");
     let holds = Arc::new(Mutex::new(Vec::new()));
@@ -292,7 +320,7 @@ fn microphone_sound_check_and_settings_flow() {
     ui.on_bypass_hold(move |held| {
         events.lock().unwrap().push(held);
     });
-    click(&ui, 240., 280.);
+    click(&ui, 650., 435.);
     assert_eq!(*holds.lock().unwrap(), [true, false]);
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Space.into(),
@@ -314,11 +342,37 @@ fn microphone_sound_check_and_settings_flow() {
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Space.into(),
     });
-    click(&ui, 400., 38.);
-    assert!(!ui.get_test_open());
+    click(&ui, 800., 38.);
+    assert!(ui.get_settings_open());
     assert_eq!(holds.lock().unwrap().last(), Some(&false));
     ui.set_test_mode(TestMode::Idle);
+    ui.set_settings_open(false);
+    ui.set_test_mode(TestMode::Monitoring);
+    capture(&ui, "09-hold-before-hide");
+    click(&ui, 650., 435.);
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Space.into(),
+    });
+    let before = stops.load(Ordering::Relaxed);
+    ui.set_window_visible(false);
+    capture(&ui, "09-hidden");
+    assert!(stops.load(Ordering::Relaxed) > before);
+    assert_eq!(holds.lock().unwrap().last(), Some(&false));
+    ui.set_window_visible(true);
+    click(&ui, 650., 435.);
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Space.into(),
+    });
+    let before = stops.load(Ordering::Relaxed);
+    ui.window().set_minimized(true);
+    capture(&ui, "09-minimized");
+    assert!(stops.load(Ordering::Relaxed) > before);
+    assert_eq!(holds.lock().unwrap().last(), Some(&false));
+    ui.window().set_minimized(false);
+    ui.set_test_mode(TestMode::Idle);
 
+    ui.set_settings_open(false);
+    ui.window().set_size(LogicalSize::new(480., 600.));
     ui.set_setup_open(true);
     ui.set_setup_step(0);
     capture(&ui, "10-setup-microphone");
@@ -348,6 +402,13 @@ fn microphone_sound_check_and_settings_flow() {
         capture(&ui, &format!("12-{name}"));
     }
     ui.set_audio_status(AudioStatus::Ready);
+    ui.set_mics(ModelRc::new(VecModel::from(vec![
+        "USB microphone with a very long device and manufacturer name (Analog Stereo)".into(),
+    ])));
+    ui.set_mic_index(0);
+    ui.window().set_size(LogicalSize::new(880., 640.));
+    capture(&ui, "13-long-microphone-wide");
+    ui.window().set_size(LogicalSize::new(480., 600.));
     ui.set_users("A calling app with a long name, and another recording app".into());
     capture(&ui, "13-in-use");
     ui.set_enabled(false);
