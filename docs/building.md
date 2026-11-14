@@ -264,6 +264,37 @@ requires the six source build/test jobs. Candidate uploads do not publish a
 release. Automated results do not replace real desktop, microphone, Bluetooth,
 login, and suspend/resume testing.
 
+### What CI prepares for a release
+
+The workflow runs on push, pull request, or manual dispatch. Its repository
+permissions are read-only: it uploads review artifacts, but does not create a
+tag, publish a GitHub Release, or upload public release assets. A local build
+or test pass is separate from a passing Actions run for the release commit.
+
+The **All automated release gates** job requires all six source build/test
+jobs, the AppImage build and payload inspection, and all six runtime jobs to
+succeed. Failed, skipped, or cancelled dependencies prevent it from passing.
+
+Packaging generates dependency license reports with pinned `cargo-about`,
+checks reviewed license-input checksums and required copyright supplements,
+and includes notices and `Cargo.lock` in the AppImage. Payload inspection
+checks that the required notice files are present. The evidence records the
+build environment, tool checksums, dependency inventory, and inspection output.
+
+These checks do not prepare or verify a complete corresponding-source package.
+CI downloads a checksum-pinned prebuilt AppImage runtime; it does not build
+that runtime from source, resolve its incorporated Alpine library revisions,
+or collect and test its source/relinking materials. The license-input source
+URLs identify notice snapshots, not a complete runtime source package.
+
+Before binary publication, separately prepare matching Esquie source, locked
+dependency/model sources, build scripts, and runtime/library source and
+relinking materials, with clear download instructions beside the binary.
+Use tracked files from the release commit for the Esquie source archive;
+do not archive the entire working directory. A repository source archive alone
+does not collect external dependency or runtime sources. See
+[third-party notices](../THIRD_PARTY_NOTICES.md#finding-the-texts-and-source).
+
 To update a pinned tool, change its URL in `container-build.sh` and its line in
 `tools.sha256`, using the digest published with the release, then rebuild and
 rerun the tests.
