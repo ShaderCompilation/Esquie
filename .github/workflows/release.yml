@@ -119,6 +119,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: packaging/release/esquie.pub
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: appimage-candidate-x86_64
@@ -127,7 +131,9 @@ jobs:
         run: |
           cd target/appimage
           sha256sum --check ./*.sha256
-      - name: Create release with AppImage and checksum
+      # A draft stays out of /releases/latest. The maintainer signs the checksum
+      # offline with packaging/release/sign.sh, which then publishes it.
+      - name: Create draft release with AppImage and checksum
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -136,6 +142,7 @@ jobs:
           version="${TAG#v}"
           appimage="Esquie-${version}-x86_64.AppImage"
           checksum="$(sha256sum "target/appimage/${appimage}" | cut -d' ' -f1)"
+          public_key="$(sed -n 2p packaging/release/esquie.pub)"
           cat > target/release-notes.md <<EOF
           Esquie ${version} for Linux x86_64.
 
@@ -143,10 +150,12 @@ jobs:
 
           - \`${appimage}\` — the application
           - \`${appimage}.sha256\` — SHA-256 checksum
+          - \`${appimage}.sha256.minisig\` — [minisign](https://jedisct1.github.io/minisign/) signature of the checksum
 
           ## Verify and run
 
           \`\`\`sh
+          minisign -Vm ${appimage}.sha256 -P ${public_key}
           sha256sum --check ${appimage}.sha256
           chmod +x ${appimage}
           ./${appimage}
@@ -170,5 +179,6 @@ jobs:
           gh release create "$TAG" \
             "target/appimage/${appimage}" \
             "target/appimage/${appimage}.sha256" \
+            --draft \
             --title "Esquie ${version}" \
             --notes-file target/release-notes.md

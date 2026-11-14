@@ -12,13 +12,22 @@ suspend/resume compatibility. See [troubleshooting](troubleshooting.md) for help
 
 ## Download, verify, and run
 
-Download the AppImage and its `.sha256` file into the same directory, then:
+Download the AppImage, its `.sha256` file, and its `.sha256.minisig` signature
+into the same directory, then:
 
 ```sh
-sha256sum --check Esquie-0.1.1-x86_64.AppImage.sha256
-chmod +x Esquie-0.1.1-x86_64.AppImage
-./Esquie-0.1.1-x86_64.AppImage
+minisign -Vm Esquie-<version>-x86_64.AppImage.sha256 -P RWQvr7YQ+BC9FdWSOgeTvrDOyn82Z0R97RNx2GhlrtIVQ3dhhQJ6sMPh
+sha256sum --check Esquie-<version>-x86_64.AppImage.sha256
+chmod +x Esquie-<version>-x86_64.AppImage
+./Esquie-<version>-x86_64.AppImage
 ```
+
+The [minisign](https://jedisct1.github.io/minisign/) step proves the checksum
+was signed with Esquie's release key (also in
+[`packaging/release/esquie.pub`](../packaging/release/esquie.pub)); the checksum
+then proves the AppImage is the one that was signed. The key is the same for
+every release, and Esquie's update check uses it too. Releases from before
+signing was introduced have no `.minisig`; verify those with the checksum alone.
 
 Downloads are not executable until you set the executable bit, either with
 `chmod +x` or in your file manager (Properties → Permissions → "Allow executing
@@ -94,14 +103,16 @@ Esquie checks GitHub for a newer stable release shortly after startup and at
 most once a day. This is its only network access; microphone audio is never
 sent anywhere. Turn it off under **Settings → About and updates → Check for
 updates automatically**; **Check now** works either way. A newer release is
-announced only when its AppImage and checksum file are published. **Update**
+announced only when its AppImage, checksum file, and a valid signature of
+that checksum by the release key are published. **Update**
 opens that AppImage's download in your browser; Esquie does not replace itself
 yet. Source builds and extracted copies get instructions instead of **Update**.
 
 Installing the update is manual:
 
 1. Quit Esquie from its tray menu (or close the window if there is no tray).
-2. Download the new AppImage and `.sha256`, and verify it as above.
+2. Download the new AppImage, `.sha256`, and `.sha256.minisig`, and verify
+   them as above.
 3. Make it executable and start it. If it replaces the old file at the same
    path, nothing else changes. If the file name or directory differs (new
    versions have new names), use **Add launcher without moving the app** from

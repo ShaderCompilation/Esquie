@@ -22,7 +22,7 @@ and X11. Calling apps that use PulseAudio also need `pipewire-pulse`.
 Standalone PulseAudio, ALSA-only, and JACK-only setups are not supported.
 
 No Rust or development packages are needed. See the
-[AppImage guide](docs/appimage.md#download-verify-and-run) for checksum
+[AppImage guide](docs/appimage.md#download-verify-and-run) for signature
 verification and full requirements, or [FUSE help](docs/appimage.md#fuse-troubleshooting)
 if the download will not open. Esquie can notify you about new releases;
 installing them is currently manual.
@@ -33,8 +33,8 @@ installing them is currently manual.
 
 ## Get started
 
-1. Download the AppImage and its `.sha256` file from the release page.
-   [Verify the checksum](docs/appimage.md#download-verify-and-run), then allow
+1. Download the AppImage and its `.sha256` and `.sha256.minisig` files from
+   the release page. [Verify the signature and checksum](docs/appimage.md#download-verify-and-run), then allow
    the AppImage to run: in your file manager, open **Properties → Permissions**
    and enable execution (the wording varies by desktop), or run
    `chmod +x "Esquie-*-x86_64.AppImage"` with the downloaded filename.

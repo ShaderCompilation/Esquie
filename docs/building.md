@@ -326,6 +326,40 @@ To update a pinned tool, change its URL in `container-build.sh` and its line in
 `tools.sha256`, using the digest published with the release, then rebuild and
 rerun the tests.
 
+### Signing and publishing a release
+
+Pushing a `v<version>` tag runs the **Tagged release** workflow. It builds and
+tests the AppImage and creates a **draft** GitHub Release with the AppImage and
+its `.sha256`. Drafts are invisible to the update check. CI never holds the
+signing key. To publish, run this on the maintainer's machine:
+
+```sh
+packaging/release/sign.sh v<version>
+```
+
+The script downloads the draft's files and checks the checksum. It then signs
+the `.sha256` with the minisign secret key (`~/.minisign/esquie.key`, or
+`ESQUIE_SECRET_KEY`), using the trusted comment `file:<checksum name>`. It
+verifies the signature against
+[`packaging/release/esquie.pub`](../packaging/release/esquie.pub), uploads the
+`.minisig`, and publishes after you confirm. Esquie compiles that public key in.
+It offers an update only when the signature verifies with that key and its
+trusted comment names exactly that release's checksum file. So controlling the
+GitHub repository is not enough to push an update.
+
+Key care:
+
+- Keep the secret key password-protected and off shared machines and CI, with
+  an offline backup.
+- If the key is lost, released builds cannot verify new updates. Generate a new
+  key, commit its public file, and ask users to install the next release by
+  hand.
+- To rotate a key that is still available, ship one release signed with the old
+  key that embeds the new public key. Sign everything after that with the new
+  key.
+- If the key leaks, rotate immediately. Builds that still embed the old key
+  would accept updates signed with it.
+
 ## Audio tuning
 
 Values that aren't in the UI live in `Tuning` in `src/dsp.rs`. Each can be

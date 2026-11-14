@@ -1,5 +1,5 @@
-//! Update discovery: the latest stable GitHub Release, its checksum asset, and
-//! the daily schedule. Everything here runs on the updater thread; the UI and
+//! Update discovery: the latest stable GitHub Release, its signed checksum,
+//! and the daily schedule. Everything here runs on the updater thread; the UI and
 //! audio threads never wait on the network. Microphone processing stays offline.
 
 use std::io::{self, Read, Write};
@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use minisign_verify::{PublicKey, Signature};
 use semver::Version;
 use sha2::{Digest, Sha256};
 
@@ -18,9 +19,19 @@ const LATEST_API: &str = "https://api.github.com/repos/ShaderCompilation/Esquie/
 const PAGE_PREFIX: &str = "https://github.com/ShaderCompilation/Esquie/releases/";
 const DOWNLOAD_PREFIX: &str = "https://github.com/ShaderCompilation/Esquie/releases/download/";
 
+/// Minisign key that signs each release's `.sha256` file. The secret half never
+/// leaves the maintainer's machine, so control of the GitHub repository alone
+/// cannot publish an update this app accepts. See docs/building.md.
+const RELEASE_KEY_FILE: &str = include_str!("../packaging/release/esquie.pub");
+
+/// The base64 line of the key file; a malformed file fails every check.
+fn release_public_key() -> &'static str {
+    RELEASE_KEY_FILE.lines().nth(1).unwrap_or_default()
+}
+
 /// Release metadata is a few kilobytes; anything near this is not GitHub's.
 const METADATA_LIMIT: u64 = 1 << 20;
-/// One `sha256sum` line.
+/// One `sha256sum` line, or one minisign signature (about 300 bytes).
 const CHECKSUM_LIMIT: u64 = 4 << 10;
 /// Refuse to stream an implausibly large AppImage to disk.
 pub const APPIMAGE_LIMIT: u64 = 1 << 30;
@@ -41,6 +52,7 @@ pub enum Error {
     Malformed(String),
     MissingAsset(String),
     Checksum(String),
+    Signature(String),
     Write(String),
 }
 
@@ -71,6 +83,10 @@ impl std::fmt::Display for Error {
                 "The newest release is missing {name}, so it cannot be offered yet."
             ),
             Error::Checksum(detail) => write!(f, "The release checksum is not valid: {detail}."),
+            Error::Signature(detail) => write!(
+                f,
+                "The release signature is not valid, so it cannot be offered: {detail}."
+            ),
             Error::Write(detail) => write!(f, "Could not write the download: {detail}."),
         }
     }
@@ -120,16 +136,28 @@ pub fn appimage_name(version: &Version) -> String {
 }
 
 /// Ask GitHub for the latest stable release. A newer one is offered only once
-/// its AppImage and well-formed, matching checksum asset are both present.
+/// its AppImage, checksum, and a valid signature of that checksum by the
+/// release key are all present.
 pub fn check(transport: &dyn Transport, current: &Version) -> Result<Outcome, Error> {
+    check_with_key(transport, current, release_public_key())
+}
+
+fn check_with_key(
+    transport: &dyn Transport,
+    current: &Version,
+    key: &str,
+) -> Result<Outcome, Error> {
     let body = fetch(transport, LATEST_API, METADATA_LIMIT)?;
     let Some(candidate) = parse_release(&body, current)? else {
         return Ok(Outcome::UpToDate);
     };
-    let checksum = match fetch(transport, &candidate.checksum.url, CHECKSUM_LIMIT) {
-        Err(Error::NoRelease) => Err(Error::MissingAsset(candidate.checksum.name.clone())),
+    let asset = |asset: &Asset| match fetch(transport, &asset.url, CHECKSUM_LIMIT) {
+        Err(Error::NoRelease) => Err(Error::MissingAsset(asset.name.clone())),
         other => other,
-    }?;
+    };
+    let checksum = asset(&candidate.checksum)?;
+    let signature = asset(&candidate.signature)?;
+    verify_checksum(key, &checksum, &signature, &candidate.checksum.name)?;
     let sha256 = parse_checksum(&checksum, &candidate.appimage.name)?;
     Ok(Outcome::Available(Release {
         version: candidate.version,
@@ -181,6 +209,7 @@ struct Candidate {
     page: String,
     appimage: Asset,
     checksum: Asset,
+    signature: Asset,
 }
 
 /// `None` when the release is not a newer stable version.
@@ -237,13 +266,42 @@ fn parse_release(body: &[u8], current: &Version) -> Result<Option<Candidate>, Er
     };
     let name = appimage_name(&version);
     let checksum = find(format!("{name}.sha256"), CHECKSUM_LIMIT)?;
+    let signature = find(format!("{name}.sha256.minisig"), CHECKSUM_LIMIT)?;
     let appimage = find(name, APPIMAGE_LIMIT)?;
     Ok(Some(Candidate {
         version,
         page,
         appimage,
         checksum,
+        signature,
     }))
+}
+
+/// Accept `checksum` only with a prehashed minisign signature by `key` whose
+/// signed trusted comment names exactly this checksum file. The file name
+/// carries the version, so an older signed release cannot pose as a newer one.
+fn verify_checksum(key: &str, checksum: &[u8], signature: &[u8], name: &str) -> Result<(), Error> {
+    let key = PublicKey::from_base64(key)
+        .map_err(|e| Error::Signature(format!("the embedded key is unusable ({e})")))?;
+    let signature = std::str::from_utf8(signature)
+        .ok()
+        .and_then(|text| Signature::decode(text).ok())
+        .ok_or_else(|| Error::Signature("the signature file is malformed".into()))?;
+    key.verify(checksum, &signature, false).map_err(|e| {
+        Error::Signature(match e {
+            minisign_verify::Error::UnexpectedKeyId => {
+                "it was not made with Esquie's release key".into()
+            }
+            e => e.to_string(),
+        })
+    })?;
+    if signature.trusted_comment() != format!("file:{name}") {
+        return Err(Error::Signature(format!(
+            "it was made for {:?}, not {name:?}",
+            signature.trusted_comment()
+        )));
+    }
+    Ok(())
 }
 
 /// Accept exactly one `sha256sum` line naming the expected file.
@@ -277,7 +335,8 @@ fn parse_checksum(body: &[u8], expected: &str) -> Result<[u8; 32], Error> {
 
 /// Stream a release's AppImage into `out`, hashing as it goes. The caller owns
 /// staging and must discard `out` on any error. Wired into replacement by the
-/// installer; integrity only, not authenticity.
+/// installer. Authenticity comes from `check`, which only builds a `Release`
+/// from a checksum signed with the release key.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn download(
     transport: &dyn Transport,
@@ -507,6 +566,49 @@ mod tests {
 
     const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    // Signature fixtures from a throwaway key whose secret was discarded:
+    //   minisign -G -W -p test.pub -s test.key
+    //   printf '%s  %s\n' "$DIGEST" "$name" > "$name.sha256"
+    //   minisign -S -s test.key -m "$name.sha256" -t "file:$name.sha256"
+    // Ed25519 is deterministic, so every signature of the 0.2.0 checksum
+    // shares its first line. Variants: `-l` (legacy), another `-t`, another key.
+    const TEST_KEY: &str = "RWSO1r38gKCvSjU2t+CUATUnf4SamM8LcsoIZo4S+DLemHzaPobg2qQ+";
+    const SIGNATURES: [(&str, &str); 2] = [
+        (
+            "0.2.0",
+            "RUSO1r38gKCvSrSI9Z9u9L+0A4Bjrsp6udCUMh6NU/Sc8avASeiMVq2IgOmAUyMa1Fi3n2aibUZCuefqojwxR7DDTStdSe3l0gU=\n\
+             trusted comment: file:Esquie-0.2.0-x86_64.AppImage.sha256\n\
+             37tQyw1N1h8rHPxGtAooZUqpbcqfbd2/woJpPdhgMUMU/VnrcYM+MNnikMqtmvJH6YvbZ5grbB5Wr0F20CcnCw==",
+        ),
+        (
+            "0.10.0",
+            "RUSO1r38gKCvSoCstC+SvpHFeNKdbv07H+cFBKLFq7vxS4NVKZr+Gn+Eyx3ZP4sLAc3R38nFWt8mjs0SAB0Yhc5LnVZuKfg9/wc=\n\
+             trusted comment: file:Esquie-0.10.0-x86_64.AppImage.sha256\n\
+             6ohuoiwNAl2Zjqg7DKUc/J7nuoXp4692CtsRRDUz2MgKq+0EXRY5tYVvxqvTlBPZB3UOPUYVQiT+b7BhJCt5Bw==",
+        ),
+    ];
+    /// The 0.2.0 checksum signed for 0.1.9's file name.
+    const SIGNED_FOR_OLDER: &str = "RUSO1r38gKCvSrSI9Z9u9L+0A4Bjrsp6udCUMh6NU/Sc8avASeiMVq2IgOmAUyMa1Fi3n2aibUZCuefqojwxR7DDTStdSe3l0gU=\n\
+         trusted comment: file:Esquie-0.1.9-x86_64.AppImage.sha256\n\
+         1XyrY2wyjUSgfYgkXu/Sq0gGWxyI32g50ysNNSgCNYntbO9z7pAdyhJm4u+ZEEm/ya0UJDgs0UTlIRPpzh33Bw==";
+    /// The 0.2.0 checksum, signed without prehashing (`minisign -l`).
+    const SIGNED_LEGACY: &str = "RWSO1r38gKCvSqA9uGUZ3Uf2rYUeKXqRBvBinlQQxP6Dj/r9hPNNYusx1S3U2LjF9ENo/PMFz6bSilTK23AmDiAqaZucPcOmdAA=\n\
+         trusted comment: file:Esquie-0.2.0-x86_64.AppImage.sha256\n\
+         K767UZOBEw+ZwwKv5NhXDS78w1fMZ+mQlrwcusThUob688MtWICAc4uOmlg1Ap8Piis1CHykjFO2aQcIpBipDA==";
+    /// The 0.2.0 checksum, signed by a different key.
+    const SIGNED_BY_OTHER: &str = "RUSKCSYSQ7zfkkA4gIhfC4EfXppFEC6Fj+4GOfu6WOKHKX7ui/Rzz8v39TcUoMsRjKq4SZbto07feDjReItrVxej4h1WM85IkwI=\n\
+         trusted comment: file:Esquie-0.2.0-x86_64.AppImage.sha256\n\
+         DFKuHGsayD1zMhGthVk2dteeEwsDrU6CvQCdmeERk2eSP1T+cy5O8/CcxfNsPxnpV9rdLNcgR9ZYxERQ1pKqCA==";
+
+    fn minisig(lines: &str) -> Vec<u8> {
+        format!("untrusted comment: signature from minisign secret key\n{lines}\n").into_bytes()
+    }
+
+    /// Checks against the test key; `super::check` uses the release key.
+    fn check(transport: &dyn Transport, current: &Version) -> Result<Outcome, Error> {
+        check_with_key(transport, current, TEST_KEY)
+    }
+
     #[derive(Clone)]
     enum Fixture {
         Ok(Vec<u8>),
@@ -580,22 +682,34 @@ mod tests {
         format!("{DOWNLOAD_PREFIX}v{version}/Esquie-{version}-x86_64.AppImage.sha256")
     }
 
+    fn signature_url(version: &str) -> String {
+        format!("{}.minisig", checksum_url(version))
+    }
+
     fn published(version: &str) -> Fake {
         let name = format!("Esquie-{version}-x86_64.AppImage");
-        Fake::default()
+        let mut fake = Fake::default()
             .with(
                 LATEST_API,
                 Fixture::Ok(release_json(
                     &format!("v{version}"),
                     false,
                     false,
-                    &[(&name, 1000), (&format!("{name}.sha256"), 99)],
+                    &[
+                        (&name, 1000),
+                        (&format!("{name}.sha256"), 99),
+                        (&format!("{name}.sha256.minisig"), 300),
+                    ],
                 )),
             )
             .with(
                 &checksum_url(version),
                 Fixture::Ok(format!("{DIGEST}  {name}\n").into_bytes()),
-            )
+            );
+        if let Some((_, lines)) = SIGNATURES.iter().find(|(v, _)| *v == version) {
+            fake = fake.with(&signature_url(version), Fixture::Ok(minisig(lines)));
+        }
+        fake
     }
 
     #[test]
@@ -650,12 +764,27 @@ mod tests {
         ));
         let name = "Esquie-0.2.0-x86_64.AppImage";
         let sum = format!("{name}.sha256");
+        let sig = format!("{name}.sha256.minisig");
         assert_eq!(
             malformed(&release_json("v0.2.0", false, false, &[(name, 10)])),
             Err(Error::MissingAsset(sum.clone()))
         );
         assert_eq!(
-            malformed(&release_json("v0.2.0", false, false, &[(&sum, 10)])),
+            malformed(&release_json(
+                "v0.2.0",
+                false,
+                false,
+                &[(name, 10), (&sum, 10)]
+            )),
+            Err(Error::MissingAsset(sig.clone()))
+        );
+        assert_eq!(
+            malformed(&release_json(
+                "v0.2.0",
+                false,
+                false,
+                &[(&sum, 10), (&sig, 10)]
+            )),
             Err(Error::MissingAsset(name.into()))
         );
         // A differently named AppImage is not the release's x86_64 asset.
@@ -664,7 +793,11 @@ mod tests {
                 "v0.2.0",
                 false,
                 false,
-                &[("Esquie-0.2.0-aarch64.AppImage", 10), (&sum, 10)]
+                &[
+                    ("Esquie-0.2.0-aarch64.AppImage", 10),
+                    (&sum, 10),
+                    (&sig, 10)
+                ]
             )),
             Err(Error::MissingAsset(_))
         ));
@@ -673,7 +806,7 @@ mod tests {
                 "v0.2.0",
                 false,
                 false,
-                &[(name, 0), (&sum, 10)]
+                &[(name, 0), (&sum, 10), (&sig, 10)]
             )),
             Err(Error::Malformed(_))
         ));
@@ -682,7 +815,7 @@ mod tests {
             "v0.2.0",
             false,
             false,
-            &[(name, 10), (&sum, 10)],
+            &[(name, 10), (&sum, 10), (&sig, 10)],
         ))
         .unwrap();
         foreign["assets"][0]["browser_download_url"] = "https://example.com/esquie".into();
@@ -722,12 +855,16 @@ mod tests {
                 "{bad:?}"
             );
         }
-        // The whole check fails rather than offering an unverifiable update.
+        // The whole check fails rather than offering an unverifiable update;
+        // a substituted checksum is caught by its signature before parsing.
         let fake = published("0.2.0").with(
             &checksum_url("0.2.0"),
             Fixture::Ok(format!("{DIGEST}  Esquie-0.1.9-x86_64.AppImage").into_bytes()),
         );
-        assert!(matches!(check(&fake, &v("0.1.0")), Err(Error::Checksum(_))));
+        assert!(matches!(
+            check(&fake, &v("0.1.0")),
+            Err(Error::Signature(_))
+        ));
         let fake = published("0.2.0").with(&checksum_url("0.2.0"), Fixture::Status(404, None));
         assert_eq!(
             check(&fake, &v("0.1.0")),
@@ -735,6 +872,83 @@ mod tests {
                 "Esquie-0.2.0-x86_64.AppImage.sha256".into()
             ))
         );
+    }
+
+    #[test]
+    fn requires_a_release_key_signature_for_the_checksum() {
+        assert!(PublicKey::from_base64(release_public_key()).is_ok());
+        let name = "Esquie-0.2.0-x86_64.AppImage.sha256";
+        let checksum = format!("{DIGEST}  Esquie-0.2.0-x86_64.AppImage\n");
+        let verify = |key: &str, checksum: &str, signature: &[u8]| {
+            verify_checksum(key, checksum.as_bytes(), signature, name)
+        };
+        let good = minisig(SIGNATURES[0].1);
+        assert_eq!(verify(TEST_KEY, &checksum, &good), Ok(()));
+
+        let rejected = |result: Result<(), Error>| matches!(result, Err(Error::Signature(_)));
+        // Any change to the signed checksum, e.g. a swapped digest.
+        let swapped = checksum.replacen('0', "f", 1);
+        assert!(rejected(verify(TEST_KEY, &swapped, &good)));
+        // Valid signatures that are not this release's.
+        assert!(rejected(verify(release_public_key(), &checksum, &good)));
+        assert!(rejected(verify(
+            TEST_KEY,
+            &checksum,
+            &minisig(SIGNED_BY_OTHER)
+        )));
+        assert!(rejected(verify(
+            TEST_KEY,
+            &checksum,
+            &minisig(SIGNED_FOR_OLDER)
+        )));
+        assert!(rejected(verify(
+            TEST_KEY,
+            &checksum,
+            &minisig(SIGNED_LEGACY)
+        )));
+        // Malformed signature files.
+        for bad in [
+            &b""[..],
+            b"not a signature",
+            &good[..good.len() / 2],
+            b"\xff\xfe",
+        ] {
+            assert!(rejected(verify(TEST_KEY, &checksum, bad)), "{bad:?}");
+        }
+
+        // The whole check fails rather than offering an unsigned update.
+        let check_with = |fixture| {
+            check(
+                &published("0.2.0").with(&signature_url("0.2.0"), fixture),
+                &v("0.1.0"),
+            )
+        };
+        assert!(matches!(
+            check_with(Fixture::Ok(minisig(SIGNED_BY_OTHER))),
+            Err(Error::Signature(_))
+        ));
+        assert_eq!(
+            check_with(Fixture::Status(404, None)),
+            Err(Error::MissingAsset(format!("{name}.minisig")))
+        );
+        assert_eq!(
+            check_with(Fixture::Ok(vec![b' '; CHECKSUM_LIMIT as usize + 1])),
+            Err(Error::TooLarge)
+        );
+        // A tampered checksum with the original signature.
+        let fake = published("0.2.0").with(
+            &checksum_url("0.2.0"),
+            Fixture::Ok(swapped.clone().into_bytes()),
+        );
+        assert!(matches!(
+            check(&fake, &v("0.1.0")),
+            Err(Error::Signature(_))
+        ));
+        // The production key rejects test-key signatures.
+        assert!(matches!(
+            super::check(&published("0.2.0"), &v("0.1.0")),
+            Err(Error::Signature(_))
+        ));
     }
 
     #[test]
@@ -895,7 +1109,7 @@ mod tests {
     #[ignore = "uses the network"]
     fn live_latest_release() {
         // While the repository is private, GitHub answers 404 after TLS succeeds.
-        match check(&Http::new(), &v("0.0.1")) {
+        match super::check(&Http::new(), &v("0.0.1")) {
             Ok(Outcome::Available(r)) => assert!(r.version >= v("0.1.1")),
             Err(Error::NoRelease) => {}
             other => panic!("unexpected result: {other:?}"),
