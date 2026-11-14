@@ -21,7 +21,6 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option
     let handoff = Arc::new(Mutex::new(None));
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let initial = lock(&settings).clone();
-    ui.set_automatic_checks(initial.automatic_checks);
     if let Ok(locations) = Locations::get() {
         ui.set_install_directory(
             initial

@@ -506,25 +506,29 @@ fn microphone_sound_check_and_settings_flow() {
     );
     ui.set_can_switch(true);
     ui.set_crashed_last_run(true);
-    capture(&ui, "15-settings-expanded");
+    let settings_top = capture(&ui, "15-settings-expanded");
     key(&ui, Key::End);
     let settings_bottom = capture(&ui, "15-settings-expanded-bottom");
-    let stride = settings_bottom.width() as usize;
-    let background = settings_bottom.as_slice()[0];
-    let mut gaps = 0;
-    let mut run = 0;
-    for y in 100..settings_bottom.height() as usize - 50 {
-        if settings_bottom.as_slice()[y * stride + stride / 2] == background {
-            run += 1;
-            if run == 10 {
-                gaps += 1;
+    // Separate cards leave runs of page background between them.
+    let gaps = |pixels: &slint::SharedPixelBuffer<slint::Rgba8Pixel>| {
+        let stride = pixels.width() as usize;
+        let background = pixels.as_slice()[0];
+        let mut gaps = 0;
+        let mut run = 0;
+        for y in 100..pixels.height() as usize - 50 {
+            if pixels.as_slice()[y * stride + stride / 2] == background {
+                run += 1;
+                if run == 10 {
+                    gaps += 1;
+                }
+            } else {
+                run = 0;
             }
-        } else {
-            run = 0;
         }
-    }
+        gaps
+    };
     assert!(
-        gaps >= 2,
+        gaps(&settings_top) >= 2 && gaps(&settings_bottom) >= 1,
         "expanded settings cards and their buttons must not overlap"
     );
     key(&ui, Key::Escape);
@@ -532,6 +536,70 @@ fn microphone_sound_check_and_settings_flow() {
     assert!(!ui.get_settings_open());
     capture(&ui, "16-installation-suggestion");
     ui.set_install_prompt(false);
+
+    // A verified newer release: the notice offers Update, notes, and Later.
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    for (callback, name) in [
+        (AppWindow::on_start_update as fn(&AppWindow, _), "update"),
+        (AppWindow::on_open_release_notes, "notes"),
+        (AppWindow::on_dismiss_update_notice, "later"),
+        (AppWindow::on_check_updates, "check"),
+    ] {
+        let updates = updates.clone();
+        callback(&ui, move || updates.lock().unwrap().push(name));
+    }
+    ui.set_update_version("0.2.0".into());
+    ui.set_update_installable(true);
+    ui.set_update_status("Esquie 0.2.0 is available.".into());
+    ui.set_update_notice(true);
+    key(&ui, Key::Home);
+    capture(&ui, "16-update-notice");
+    click(&ui, "Release notes");
+    click(&ui, "Update");
+    click(&ui, "Later");
+    assert_eq!(*updates.lock().unwrap(), ["notes", "update", "later"]);
+    // Source and extracted copies get instructions instead of Update.
+    ui.set_update_installable(false);
+    ui.set_update_instructions(
+        "This copy was built from source. Update the source to the new release, then rebuild or run install.sh.".into(),
+    );
+    capture(&ui, "16-update-notice-manual");
+    ui.set_update_notice(false);
+
+    // Settings: an explicit failure offers Retry; toggling is reported.
+    let toggles = Arc::new(Mutex::new(Vec::new()));
+    let observed = toggles.clone();
+    ui.on_automatic_checks_changed(move |on| observed.lock().unwrap().push(on));
+    ui.set_automatic_checks(true);
+    ui.set_settings_open(true);
+    ui.set_update_version("".into());
+    ui.set_update_error(true);
+    ui.set_update_status(
+        "GitHub's request limit was reached. Try again in about 12 minutes.".into(),
+    );
+    key(&ui, Key::End);
+    capture(&ui, "16-update-settings-error");
+    click(&ui, "Retry");
+    // The row's title text shares the switch's label; activate the switch.
+    i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+        &ui,
+        "Check for updates automatically",
+    )
+    .find(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Switch))
+    .expect("automatic update switch")
+    .invoke_accessible_default_action();
+    assert_eq!(*toggles.lock().unwrap(), [false]);
+    assert!(!ui.get_automatic_checks());
+    assert_eq!(updates.lock().unwrap().last(), Some(&"check"));
+    ui.set_update_error(false);
+    ui.set_update_checking(true);
+    ui.set_update_status("Checking GitHub for updates…".into());
+    capture(&ui, "16-update-settings-checking");
+    ui.set_update_checking(false);
+    ui.set_update_status("".into());
+    ui.set_automatic_checks(true);
+    key(&ui, Key::Escape);
+    key(&ui, Key::Home);
     // Switch to light through the in-app theme toggle (right of the header's
     // navigation button) rather than forcing the palette from Rust, so the
     // switch itself stays covered.

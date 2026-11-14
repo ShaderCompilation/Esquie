@@ -442,7 +442,14 @@ export component AppWindow inherits Window {
     in property <string> collision-path;
     in property <bool> can-copy;
     in property <bool> can-switch;
-    in property <bool> automatic-checks;
+    in-out property <bool> automatic-checks;
+    in property <bool> update-checking;
+    in property <bool> update-error;     // the last explicit check or update failed
+    in property <string> update-status;
+    in property <string> update-version; // a verified newer release, or empty
+    in property <bool> update-installable; // AppImage copies; others get instructions
+    in property <string> update-instructions;
+    in-out property <bool> update-notice;
     in property <string> app-version;
     in property <bool> crashed-last-run;
     in property <bool> diagnostics-busy;
@@ -453,6 +460,11 @@ export component AppWindow inherits Window {
     callback installation-requested(int);
     callback switch-installation();
     callback export-diagnostics();
+    callback automatic-checks-changed(bool);
+    callback check-updates();
+    callback start-update();
+    callback open-release-notes();
+    callback dismiss-update-notice();
 
     callback mic-selected(int);
     callback enabled-changed(bool);
@@ -703,6 +715,22 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    if root.microphone-view && root.update-notice && root.update-version != "": Card {
+                        title: "Esquie " + root.update-version + " is available";
+                        subtitle: root.update-installable
+                            ? "You have " + root.app-version + ". Read the release notes, or download the new AppImage now."
+                            : "You have " + root.app-version + ". " + root.update-instructions;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            if root.update-installable: Button {
+                                text: "Update";
+                                primary: true;
+                                clicked => { root.microphone-position = page.content-y; root.start-update(); }
+                            }
+                            Button { text: "Release notes"; clicked => { root.open-release-notes(); } }
+                            Button { text: "Later"; clicked => { root.dismiss-update-notice(); } }
+                        }
+                    }
                     if root.settings-open: Card {
                         title: "Startup";
                         OptionRow {
@@ -778,7 +806,36 @@ export component AppWindow inherits Window {
                     if root.settings-open: Card {
                         title: "About and updates";
                         subtitle: "Esquie " + root.app-version + " · Offline microphone noise removal";
-                        Helper { text: "Update checking and downloads are not available yet. No network checks run."; }
+                        OptionRow {
+                            title: "Check for updates automatically";
+                            description: "Once a day, Esquie asks GitHub whether a newer stable release exists. Update checks use the network; your microphone audio never leaves this machine.";
+                            checked <=> root.automatic-checks;
+                            toggled(on) => { root.automatic-checks-changed(on); }
+                        }
+                        if root.update-status != "": Text {
+                            text: root.update-status;
+                            color: root.update-error ? Theme.warn : Theme.text;
+                            wrap: word-wrap;
+                            height: self.preferred-height;
+                        }
+                        if root.update-version != "" && !root.update-installable: Helper { text: root.update-instructions; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: root.update-checking ? "Checking…" : root.update-error ? "Retry" : "Check now";
+                                enabled: !root.update-checking;
+                                clicked => { root.check-updates(); }
+                            }
+                            if root.update-version != "" && root.update-installable: Button {
+                                text: "Update";
+                                primary: true;
+                                clicked => { root.start-update(); }
+                            }
+                            if root.update-version != "": Button {
+                                text: "Release notes";
+                                clicked => { root.open-release-notes(); }
+                            }
+                        }
                         Button {
                             text: "Run microphone setup";
                             clicked => {

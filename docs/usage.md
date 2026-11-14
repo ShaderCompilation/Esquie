@@ -33,8 +33,8 @@ Keep Esquie running while you use it. For installation and updates, see
   connected apps keep receiving the audio selected by the Noise removal switch.
 - **Settings**: install a per-user copy, choose its directory, or add, repair,
   and remove Esquie-owned menu launchers. Installation keeps audio running;
-  switching to the installed copy is explicit. About and updates explains that
-  automatic checks and downloads are not available yet.
+  switching to the installed copy is explicit. **About and updates** shows the
+  version, the latest check result, **Check now**, and the automatic-check toggle.
 
 The header stays visible while pages scroll. Use **Done** or **Back**, or press
 Escape, to return. Tab moves between controls; Page Up/Down and Home/End scroll

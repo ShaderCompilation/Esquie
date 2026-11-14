@@ -10,6 +10,8 @@ mod logging;
 mod settings;
 mod single_instance;
 mod tray;
+mod update_ui;
+mod updater;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -113,6 +115,8 @@ fn main() -> anyhow::Result<()> {
     ui.set_autostart(autostart::is_enabled());
     let handoff = installation_ui::setup(&ui, settings.clone());
     diagnostics::setup(&ui, crashed_last_run);
+    // Kept until quit; dropping it lets the updater thread end without being joined.
+    let updates = update_ui::setup(&ui, settings.clone());
 
     {
         let settings = settings.clone();
@@ -384,6 +388,7 @@ fn main() -> anyhow::Result<()> {
         t.shutdown().wait();
     }
 
+    drop(updates);
     let _ = cmd_tx.send(Command::Quit);
     let _ = audio_thread.join();
     // The old microphone is gone before another process creates its replacement.

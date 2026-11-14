@@ -65,7 +65,7 @@ impl Settings {
         Self::parse(&text)
     }
 
-    fn parse(text: &str) -> Self {
+    pub(crate) fn parse(text: &str) -> Self {
         // Existing installations have already chosen their audio preferences.
         // Only a missing settings file starts the new-user setup flow.
         let mut s = Self {

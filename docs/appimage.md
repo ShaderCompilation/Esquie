@@ -90,7 +90,15 @@ writing integration files. Existing source installations can continue to use
 
 ## Updating
 
-Updates are manual: the AppImage does not check for or download updates.
+Esquie checks GitHub for a newer stable release shortly after startup and at
+most once a day. This is its only network access; microphone audio is never
+sent anywhere. Turn it off under **Settings → About and updates → Check for
+updates automatically**; **Check now** works either way. A newer release is
+announced only when its AppImage and checksum file are published. **Update**
+opens that AppImage's download in your browser; Esquie does not replace itself
+yet. Source builds and extracted copies get instructions instead of **Update**.
+
+Installing the update is manual:
 
 1. Quit Esquie from its tray menu (or close the window if there is no tray).
 2. Download the new AppImage and `.sha256`, and verify it as above.

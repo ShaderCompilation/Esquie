@@ -10,6 +10,7 @@ or other calling and recording apps. It creates a virtual microphone called
 
 Powered by [DeepFilterNet 3](https://github.com/Rikorose/DeepFilterNet), with the
 model built in. Audio is processed locally. It's fully private, nothing leaves your machine.
+The only network access is an optional daily update check against GitHub.
 
 ## Download
 
@@ -23,7 +24,8 @@ Standalone PulseAudio, ALSA-only, and JACK-only setups are not supported.
 No Rust or development packages are needed. See the
 [AppImage guide](docs/appimage.md#download-verify-and-run) for checksum
 verification and full requirements, or [FUSE help](docs/appimage.md#fuse-troubleshooting)
-if the download will not open. Updates are currently manual.
+if the download will not open. Esquie can notify you about new releases;
+installing them is currently manual.
 
 ![Esquie workspace showing microphone selection, noise removal, cleanup presets, and sound check](docs/images/workspace.png)
 
