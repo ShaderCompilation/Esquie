@@ -151,6 +151,11 @@ navigation, setup, preset callbacks, the two-column workspace and its narrow
 layout (including the 760 px breakpoint), recording/listening/comparison layouts,
 momentary bypass release on navigation/hide/minimize, meter polling, scrolling,
 dark/light themes, and display scaling.
+Pointer checks find controls by their accessible names and click their rendered
+bounds, so distro font metrics do not determine the click coordinates. The build
+generates a separate UI module with Slint test metadata; production uses the
+module without that metadata. The test helper crate is pinned to the locked
+Slint version and must be updated with it.
 `ci/check.sh` saves its screenshots under `target/validation/ui`. To run it alone:
 
 ```sh
@@ -167,12 +172,16 @@ cargo build --release --locked --example audio_harness
 python3 ci/audio-integration.py
 ```
 
-This is also a required part of `ci/check.sh`. The Python standard library is
-sufficient; no pip packages are needed. The example calls the production audio
-engine and exposes a test-only JSON command/event protocol. The test creates
-private PipeWire/WirePlumber instances and synthetic mono sources, supplies a
-known tone from fixed-format harness source processes, and records two native
-consumers. Session-manager tests recreate those sources to model hardware
+`ci/check.sh` first runs the Python graph-parser regression tests. The audio
+suite applies `pw-dump` snapshots and removal records in order, including the
+separate JSON arrays emitted by older PipeWire versions during graph changes.
+
+The audio integration suite is a required part of `ci/check.sh`. The Python
+standard library is sufficient; no pip packages are needed. The example calls
+the production audio engine and exposes a test-only JSON command/event protocol.
+The test creates private PipeWire/WirePlumber instances and synthetic mono
+sources, supplies a known tone from fixed-format harness source processes, and
+records two native consumers. Session-manager tests recreate those sources to model hardware
 monitor device re-enumeration. It tests recovery, preference
 restoration, metadata replacement, error persistence, preview separation,
 recording/meter cleanup, and retry cancellation. Demand checks verify that
@@ -185,6 +194,10 @@ gate disabled and a quiet pilot to advance the model after the burst; this is
 synthetic timing/queue coverage, not speech-quality or first-word validation.
 The suite verifies actual graph rates/quanta using `pw-top` and finite output
 with the cleaning engine enabled.
+The engine retains PipeWire loop ownership between polls, re-registers its
+streams when session-manager metadata disappears, and flushes queued source
+buffers on pause and new-reader transitions. These paths are exercised by the
+consumer, restart, and onset scenarios above.
 Graph recovery waits are limited to ten seconds and Quit to one second. The
 recording-limit scenario allows twelve seconds to capture a full ten-second
 sample and checks that playback starts only after an explicit Play command.

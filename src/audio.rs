@@ -751,6 +751,8 @@ struct Conn {
     registry: RefCell<Option<(pw::registry::Listener, pw::registry::RegistryRc)>>,
     metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
     source: RefCell<Option<Stream>>,
+    /// Drop buffers already queued in PipeWire after pause or a new reader.
+    flush_source: Cell<bool>,
     capture: RefCell<Option<Stream>>,
     /// Speaker stream for the test section; exists only while testing.
     preview: RefCell<Option<Stream>>,
@@ -812,6 +814,7 @@ impl Conn {
             registry: RefCell::new(None),
             metadata: RefCell::new(None),
             source: RefCell::new(None),
+            flush_source: Cell::new(false),
             capture: RefCell::new(None),
             preview: RefCell::new(None),
             sync_seq: Cell::new(-1),
@@ -1017,6 +1020,12 @@ impl App {
             self.check_capture(&conn, now);
             self.check_preview(&conn);
             self.engine.borrow_mut().set_routed(conn.live_routed());
+            if conn.flush_source.replace(false)
+                && let Some(source) = conn.source.borrow().as_ref()
+                && let Err(error) = source._stream.flush(false)
+            {
+                warn!("Could not flush virtual microphone buffers: {error}");
+            }
         }
         self.update_status(now);
     }
@@ -1124,6 +1133,7 @@ impl App {
                 // Even if detach/reattach coalesce into one dispatch, the
                 // first new reader cannot inherit a preview's backlog.
                 self.engine.borrow_mut().discard_output();
+                conn.flush_source.set(true);
             }
             conn.links.borrow_mut().insert(obj.id, endpoints);
             self.send_users(conn);
@@ -1227,9 +1237,13 @@ impl App {
             .as_ref()
             .is_some_and(|(mid, ..)| *mid == id);
         if is_metadata {
-            // Removed from the server; a replacement is bound when it appears.
             conn.metadata.replace(None);
             conn.default_known.set(false);
+            // WirePlumber 0.4 cannot reliably reactivate surviving adapters
+            // after a restart. Re-register our streams on a fresh connection,
+            // retaining the preferred microphone and retrying without a manager.
+            self.lost
+                .replace(Some("session manager metadata disappeared".into()));
             return;
         }
         if conn.virtual_id.get() == Some(id) {
@@ -1403,11 +1417,15 @@ impl App {
         let engine = self.engine.clone();
         let app = Rc::downgrade(self);
         let source_engine = self.engine.clone();
+        let weak_conn = conn.weak.clone();
         let listener = stream
             .add_local_listener_with_user_data(())
             .state_changed(move |_, _, _old, new| {
                 if matches!(new, StreamState::Paused) {
                     source_engine.borrow_mut().discard_output();
+                    if let Some(conn) = weak_conn.upgrade() {
+                        conn.flush_source.set(true);
+                    }
                 }
                 if let (StreamState::Error(msg), Some(app)) = (new, app.upgrade()) {
                     let mut lost = app.lost.borrow_mut();
@@ -1768,6 +1786,20 @@ pub fn run(
     pw::init();
     let mainloop =
         pw::main_loop::MainLoopRc::new(None).context("creating the PipeWire main loop")?;
+    // Keep ownership of the loop between polls, including maintenance and
+    // teardown. PipeWire 1.0 can otherwise invoke a queued stream callback on
+    // its data thread while this thread is borrowing the shared engine.
+    struct EnteredLoop<'a>(&'a pw::loop_::Loop);
+    impl Drop for EnteredLoop<'_> {
+        fn drop(&mut self) {
+            // SAFETY: paired with enter below, on the same thread. The guard
+            // outlives the context, streams, and their callbacks.
+            unsafe { self.0.leave() };
+        }
+    }
+    // SAFETY: this new loop belongs to this thread; the guard always leaves it.
+    unsafe { mainloop.loop_().enter() };
+    let _entered = EnteredLoop(mainloop.loop_());
     let context =
         pw::context::ContextRc::new(&mainloop, None).context("creating the PipeWire context")?;
     let engine = Rc::new(RefCell::new(Engine::new(shared)?));
@@ -1818,7 +1850,8 @@ pub fn run(
             ),
             None => pw::loop_::Timeout::Infinite,
         };
-        mainloop.loop_().iterate(timeout);
+        // SAFETY: _entered holds loop ownership for the entire audio run.
+        unsafe { mainloop.loop_().iterate_unguarded(timeout) };
     }
 
     if let Some(conn) = app.conn.take() {

@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ci -p 'test_*.py'
 cargo build --release --locked
 ESQUIE_UI_OUTPUT_DIR="${CARGO_TARGET_DIR:-target}/validation/ui" cargo test --release --locked
 ESQUIE_PRIVATE_BUS=1 dbus-run-session -- timeout 30s \

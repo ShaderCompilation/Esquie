@@ -8,7 +8,7 @@ use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferTyp
 use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, LogicalSize, ModelRc, VecModel};
 
-slint::include_modules!();
+include!(concat!(env!("OUT_DIR"), "/test_app.rs"));
 
 struct SoftwarePlatform(Rc<MinimalSoftwareWindow>);
 
@@ -18,8 +18,31 @@ impl Platform for SoftwarePlatform {
     }
 }
 
-fn click(ui: &AppWindow, x: f32, y: f32) {
-    let position = LogicalPosition::new(x, y);
+fn click(ui: &AppWindow, label: &str) {
+    // Font metrics and wrapping differ between distros. Resolve the actual
+    // button bounds, then dispatch pointer events to keep hit testing covered.
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        ui.window().take_snapshot().expect("layout pass");
+    }
+    let mut buttons = i_slint_backend_testing::ElementHandle::find_by_accessible_label(ui, label);
+    let button = buttons
+        .next()
+        .unwrap_or_else(|| panic!("missing button: {label}"));
+    assert!(buttons.next().is_none(), "ambiguous button: {label}");
+    let origin = button.absolute_position();
+    let size = button.size();
+    let position = LogicalPosition::new(origin.x + size.width / 2., origin.y + size.height / 2.);
+    let window_size = ui.window().size().to_logical(ui.window().scale_factor());
+    assert!(
+        size.width > 0.
+            && size.height > 0.
+            && position.x >= 0.
+            && position.x < window_size.width
+            && position.y >= 0.
+            && position.y < window_size.height,
+        "button must be visible: {label}"
+    );
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position });
     ui.window().dispatch_event(WindowEvent::PointerPressed {
@@ -157,8 +180,8 @@ fn microphone_sound_check_and_settings_flow() {
     });
     assert_eq!(records.load(Ordering::Relaxed), 0);
     assert_eq!(monitors.load(Ordering::Relaxed), 0);
-    click(&ui, 550., 435.);
-    click(&ui, 760., 435.);
+    click(&ui, "Record a sample");
+    click(&ui, "Listen live");
     assert_eq!(records.load(Ordering::Relaxed), 1);
     assert_eq!(monitors.load(Ordering::Relaxed), 1);
     assert!(!ui.get_test_open());
@@ -167,7 +190,7 @@ fn microphone_sound_check_and_settings_flow() {
     capture(&ui, "01-microphone");
 
     // Header action works with a pointer, then keyboard activation returns.
-    click(&ui, 460., 42.);
+    click(&ui, "Settings");
     assert!(ui.get_settings_open());
     capture(&ui, "02-settings-top");
     let before = capture(&ui, "02-settings-before-scroll");
@@ -175,14 +198,14 @@ fn microphone_sound_check_and_settings_flow() {
     let bottom = capture(&ui, "02-settings-bottom");
     assert_ne!(before.as_bytes(), bottom.as_bytes(), "Settings must scroll");
     // The last action is fully reachable, followed by the page's bottom padding.
-    click(&ui, 240., 780. - 50.);
+    click(&ui, "Run microphone setup");
     assert!(
         ui.get_setup_open(),
         "last Settings action must be reachable"
     );
     assert!(!ui.get_settings_open());
     ui.set_setup_open(false);
-    click(&ui, 460., 38.);
+    click(&ui, "Settings");
     key(&ui, Key::Return);
     assert!(!ui.get_settings_open());
 
@@ -191,23 +214,23 @@ fn microphone_sound_check_and_settings_flow() {
     ui.on_strength_changed(move |value| {
         changed.lock().unwrap().push(value);
     });
-    click(&ui, 260., 410.);
+    click(&ui, "Balanced");
     assert_eq!(ui.get_strength(), 65.);
     assert_eq!(*strengths.lock().unwrap(), [65.]);
-    click(&ui, 420., 410.);
+    click(&ui, "Maximum");
     assert_eq!(ui.get_strength(), 100.);
 
     // A round trip through Settings preserves the microphone scroll position.
     ui.window().set_size(LogicalSize::new(480., 480.));
     ui.set_fine_tune_open(true);
     capture(&ui, "02-microphone-expanded");
-    click(&ui, 400., 38.);
+    click(&ui, "Settings");
     capture(&ui, "02-settings-before-return");
     key(&ui, Key::Escape);
     capture(&ui, "02-microphone-before-scroll");
     key(&ui, Key::End);
     let scrolled = capture(&ui, "02-microphone-scrolled");
-    click(&ui, 400., 38.);
+    click(&ui, "Settings");
     capture(&ui, "02-settings-scrolled-entry");
     key(&ui, Key::Escape);
     let restored = capture(&ui, "02-microphone-restored");
@@ -321,7 +344,7 @@ fn microphone_sound_check_and_settings_flow() {
     ui.on_bypass_hold(move |held| {
         events.lock().unwrap().push(held);
     });
-    click(&ui, 650., 435.);
+    click(&ui, "Hear original microphone");
     assert_eq!(*holds.lock().unwrap(), [true, false]);
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Space.into(),
@@ -343,14 +366,14 @@ fn microphone_sound_check_and_settings_flow() {
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Space.into(),
     });
-    click(&ui, 800., 38.);
+    click(&ui, "Settings");
     assert!(ui.get_settings_open());
     assert_eq!(holds.lock().unwrap().last(), Some(&false));
     ui.set_test_mode(TestMode::Idle);
     ui.set_settings_open(false);
     ui.set_test_mode(TestMode::Monitoring);
     capture(&ui, "09-hold-before-hide");
-    click(&ui, 650., 435.);
+    click(&ui, "Hear original microphone");
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Space.into(),
     });
@@ -360,7 +383,7 @@ fn microphone_sound_check_and_settings_flow() {
     assert!(stops.load(Ordering::Relaxed) > before);
     assert_eq!(holds.lock().unwrap().last(), Some(&false));
     ui.set_window_visible(true);
-    click(&ui, 650., 435.);
+    click(&ui, "Hear original microphone");
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Space.into(),
     });
@@ -377,36 +400,36 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_setup_open(true);
     ui.set_setup_step(0);
     capture(&ui, "10-setup-microphone");
-    click(&ui, 240., 558.);
+    click(&ui, "Next: test my sound");
     assert!(ui.get_test_open(), "setup opens optional sound check");
     capture(&ui, "10-setup-sound-check");
     let before = stops.load(Ordering::Relaxed);
-    click(&ui, 240., 558.);
+    click(&ui, "Next: use in my apps");
     assert!(stops.load(Ordering::Relaxed) > before);
     assert!(!ui.get_test_open());
     assert_eq!(ui.get_setup_step(), 2);
     capture(&ui, "11-setup-before-back");
-    click(&ui, 210., 38.);
+    click(&ui, "Back");
     assert_eq!(ui.get_setup_step(), 1);
     assert!(ui.get_test_open());
     key(&ui, Key::Escape);
     assert_eq!(ui.get_setup_step(), 0);
     assert!(!ui.get_test_open());
     capture(&ui, "10-setup-return-microphone");
-    click(&ui, 240., 506.);
+    click(&ui, "Skip sound check");
     assert_eq!(ui.get_setup_step(), 2);
     key(&ui, Key::Escape);
     assert_eq!(ui.get_setup_step(), 0);
     capture(&ui, "10-setup-skip-return");
-    click(&ui, 240., 558.);
+    click(&ui, "Next: test my sound");
     capture(&ui, "10-setup-test-again");
-    click(&ui, 350., 38.);
+    click(&ui, "Settings");
     assert!(ui.get_settings_open());
     key(&ui, Key::Escape);
     assert!(ui.get_test_open());
     assert_eq!(ui.get_setup_step(), 1);
     capture(&ui, "10-setup-settings-return");
-    click(&ui, 240., 558.);
+    click(&ui, "Next: use in my apps");
     capture(&ui, "11-setup-apps");
     for (width, height) in [(880., 640.), (480., 480.)] {
         ui.window().set_size(LogicalSize::new(width, height));
@@ -447,7 +470,7 @@ fn microphone_sound_check_and_settings_flow() {
     ui.on_finish_setup(move || {
         finished.fetch_add(1, Ordering::Relaxed);
     });
-    click(&ui, 240., 558.);
+    click(&ui, "Finish setup");
     assert!(!ui.get_setup_open());
     assert_eq!(finishes.load(Ordering::Relaxed), 1);
     for (name, status) in [
@@ -478,7 +501,9 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_install_prompt(true);
     ui.set_settings_open(true);
     ui.set_install_collision(true);
-    ui.set_collision_path("/home/user/A very long installation directory with spaces/esquie".into());
+    ui.set_collision_path(
+        "/home/user/A very long installation directory with spaces/esquie".into(),
+    );
     ui.set_can_switch(true);
     ui.set_crashed_last_run(true);
     capture(&ui, "15-settings-expanded");
@@ -510,7 +535,7 @@ fn microphone_sound_check_and_settings_flow() {
     // Switch to light through the in-app theme toggle (right of the header's
     // navigation button) rather than forcing the palette from Rust, so the
     // switch itself stays covered.
-    click(&ui, 438., 38.);
+    click(&ui, "Switch to light theme");
     assert_eq!(
         ui.global::<Palette>().get_color_scheme(),
         slint::language::ColorScheme::Light

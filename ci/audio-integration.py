@@ -18,6 +18,26 @@ import threading
 import time
 
 
+def parse_graph(output):
+    # pw-dump can emit removal records as separate JSON arrays even without
+    # --monitor. Apply them in order instead of assuming one JSON document.
+    decoder = json.JSONDecoder()
+    objects = {}
+    remaining = output.lstrip()
+    if not remaining:
+        raise ValueError("pw-dump returned no graph")
+    while remaining:
+        batch, end = decoder.raw_decode(remaining)
+        for obj in batch:
+            if ("info" in obj and obj["info"] is None
+                    or "props" in obj and obj["props"] is None):
+                objects.pop(obj["id"], None)
+            else:
+                objects[obj["id"]] = obj
+        remaining = remaining[end:].lstrip()
+    return list(objects.values())
+
+
 class Suite:
     def __init__(self, harness, out):
         self.harness, self.out = harness, out
@@ -199,7 +219,7 @@ wireplumber.profiles = { main = {
         self.start_manager()
 
     def graph(self):
-        return json.loads(self.run("pw-dump").stdout)
+        return parse_graph(self.run("pw-dump").stdout)
 
     def metadata_id(self):
         for obj in self.graph():
@@ -646,9 +666,9 @@ def main():
             finally:
                 if hasattr(suite, "server") and suite.server.poll() is None:
                     try:
-                        (args.out / "final-graph.json").write_text(suite.run("pw-dump").stdout)
+                        (args.out / "final-graph.json").write_text(json.dumps(suite.graph(), indent=2) + "\n")
                         (args.out / "final-links.txt").write_text(suite.run("pw-link", "-l").stdout)
-                    except (subprocess.SubprocessError, OSError):
+                    except (subprocess.SubprocessError, OSError, ValueError):
                         pass  # Preserve the original failure if the server died.
                 suite.close()
     finally:

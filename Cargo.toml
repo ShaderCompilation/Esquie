@@ -37,6 +37,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 tracing-appender = "0.2"
 
 [dev-dependencies]
+# Match the locked Slint version: its test API follows the internal ABI.
+i-slint-backend-testing = "=1.18.1"
 # Already used by ksni; the tray test fakes a StatusNotifierWatcher with it.
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 

@@ -163,6 +163,11 @@ fn emit(value: Value) {
 }
 
 fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
     if std::env::args().nth(1).as_deref() == Some("--source") {
         return source(
             &std::env::args().nth(2).expect("synthetic source name"),
@@ -188,6 +193,7 @@ fn main() -> anyhow::Result<()> {
     });
 
     for line in std::io::stdin().lock().lines() {
+        anyhow::ensure!(!engine.is_finished(), "audio thread stopped before Quit");
         let value: Value = serde_json::from_str(&line?)?;
         let command = match value["command"].as_str().unwrap_or("") {
             "select" => Some(Command::SelectMic(value["name"].as_str().unwrap().into())),
