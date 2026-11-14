@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::{
     AppWindow,
     installation::{self, Inventory, Kind, Locations, Outcome},
+    jobs::{self, Job, Jobs},
     settings::{InstallPrompt, Settings},
 };
 use slint::ComponentHandle;
@@ -17,7 +18,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option<PathBuf>>> {
+pub fn setup(
+    ui: &AppWindow,
+    settings: Arc<Mutex<Settings>>,
+    jobs: Arc<Jobs>,
+) -> Arc<Mutex<Option<PathBuf>>> {
     let handoff = Arc::new(Mutex::new(None));
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let initial = lock(&settings).clone();
@@ -90,6 +95,16 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option
             if ui.get_installation_busy() {
                 return;
             }
+            let guard = match jobs.begin(Job::Installation) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    ui.set_installation_message(
+                        "An update is downloading. Wait for it to finish, or cancel it in About and updates."
+                            .into(),
+                    );
+                    return;
+                }
+            };
             ui.set_installation_busy(true);
             ui.set_install_collision(false);
             let directory = PathBuf::from(ui.get_install_directory().as_str());
@@ -98,7 +113,7 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>) -> Arc<Mutex<Option
             let error_weak = ui.as_weak();
             let spawn = std::thread::Builder::new()
                 .name("esquie-install".into())
-                .spawn(move || run_operation(action, directory, settings, weak));
+                .spawn(move || run_operation(action, directory, settings, weak, guard));
             if let Err(e) = spawn
                 && let Some(ui) = error_weak.upgrade()
             {
@@ -136,6 +151,7 @@ fn run_operation(
     directory: PathBuf,
     settings: Arc<Mutex<Settings>>,
     weak: slint::Weak<AppWindow>,
+    guard: jobs::Guard,
 ) {
     let initial = lock(&settings).clone();
     let result = operate(action, &directory, &initial);
@@ -151,6 +167,7 @@ fn run_operation(
         save_error = s.try_save().err();
     }
     let snapshot = lock(&settings).clone();
+    drop(guard);
     let _ =
         weak.upgrade_in_event_loop(move |ui| finish(&ui, action, result, &snapshot, save_error));
 }

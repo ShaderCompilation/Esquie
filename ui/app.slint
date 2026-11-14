@@ -450,6 +450,12 @@ export component AppWindow inherits Window {
     in property <bool> update-installable; // AppImage copies; others get instructions
     in property <string> update-instructions;
     in-out property <bool> update-notice;
+    in property <bool> update-downloading;     // a download job is running
+    in property <float> update-progress;       // 0..1 while downloading
+    in property <bool> update-download-failed; // Update becomes Retry update
+    in property <bool> update-ready;           // verified and staged beside the target
+    // Installation and update jobs are serialized.
+    property <bool> jobs-busy: root.installation-busy || root.update-downloading;
     in property <string> app-version;
     in property <bool> crashed-last-run;
     in property <bool> diagnostics-busy;
@@ -463,6 +469,7 @@ export component AppWindow inherits Window {
     callback automatic-checks-changed(bool);
     callback check-updates();
     callback start-update();
+    callback cancel-update();
     callback open-release-notes();
     callback dismiss-update-notice();
 
@@ -715,7 +722,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if root.microphone-view && root.update-notice && root.update-version != "": Card {
+                    if root.microphone-view && root.update-notice && root.update-version != "" && !root.update-downloading && !root.update-ready: Card {
                         title: "Esquie " + root.update-version + " is available";
                         subtitle: root.update-installable
                             ? "You have " + root.app-version + ". Read the release notes, or download the new AppImage now."
@@ -725,6 +732,7 @@ export component AppWindow inherits Window {
                             if root.update-installable: Button {
                                 text: "Update";
                                 primary: true;
+                                enabled: !root.installation-busy;
                                 clicked => { root.microphone-position = page.content-y; root.start-update(); }
                             }
                             Button { text: "Release notes"; clicked => { root.open-release-notes(); } }
@@ -749,11 +757,11 @@ export component AppWindow inherits Window {
                         if root.can-switch: VerticalLayout {
                             spacing: 8px;
                             Text { text: "Your current audio session is still running. Switching to the installed copy briefly interrupts the virtual microphone."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; height: self.preferred-height; }
-                            Button { text: "Switch to installed copy"; primary: true; enabled: !root.installation-busy; clicked => { root.switch-installation(); } }
+                            Button { text: "Switch to installed copy"; primary: true; enabled: !root.jobs-busy; clicked => { root.switch-installation(); } }
                         }
                         if root.installation-ready: Button {
                             text: root.installation-options-open ? "Hide installation options" : "Manage installation";
-                            enabled: !root.installation-busy;
+                            enabled: !root.jobs-busy;
                             clicked => { root.installation-options-open = !root.installation-options-open; }
                         }
                         if !root.installation-ready || root.installation-options-open: VerticalLayout {
@@ -763,26 +771,26 @@ export component AppWindow inherits Window {
                             LineEdit {
                                 accessible-label: "Installation directory";
                                 text <=> root.install-directory;
-                                enabled: !root.installation-busy;
+                                enabled: !root.jobs-busy;
                                 edited => { root.install-collision = false; root.directory-changed(self.text); }
                             }
                             Text { text: "A copy named esquie will be installed here. The original file stays in place."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; height: self.preferred-height; }
                             Button {
                                 text: root.installation-busy ? "Working…" : "Install a copy";
-                                enabled: !root.installation-busy && root.can-copy;
+                                enabled: !root.jobs-busy && root.can-copy;
                                 primary: !root.installation-ready;
                                 clicked => { root.installation-requested(0); }
                             }
                             if root.install-collision: VerticalLayout {
                                 spacing: 8px;
                                 Text { text: "Another file exists at " + root.collision-path + ". Replace it, or choose another directory above."; color: Theme.warn; wrap: word-wrap; height: self.preferred-height; }
-                                Button { text: "Replace existing installation"; enabled: !root.installation-busy; clicked => { root.installation-requested(1); } }
+                                Button { text: "Replace existing installation"; enabled: !root.jobs-busy; clicked => { root.installation-requested(1); } }
                             }
-                            Button { text: "Add launcher without moving the app"; enabled: !root.installation-busy; clicked => { root.installation-requested(2); } }
+                            Button { text: "Add launcher without moving the app"; enabled: !root.jobs-busy; clicked => { root.installation-requested(2); } }
                             HorizontalLayout {
                                 spacing: 8px;
-                                Button { text: "Repair launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(3); } }
-                                Button { text: "Remove launcher"; enabled: !root.installation-busy; clicked => { root.installation-requested(4); } }
+                                Button { text: "Repair launcher"; enabled: !root.jobs-busy; clicked => { root.installation-requested(3); } }
+                                Button { text: "Remove launcher"; enabled: !root.jobs-busy; clicked => { root.installation-requested(4); } }
                             }
                         }
                     }
@@ -818,18 +826,24 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                             height: self.preferred-height;
                         }
+                        if root.update-downloading: Progress { value: root.update-progress; }
                         if root.update-version != "" && !root.update-installable: Helper { text: root.update-instructions; }
                         HorizontalLayout {
                             spacing: 8px;
                             Button {
-                                text: root.update-checking ? "Checking…" : root.update-error ? "Retry" : "Check now";
-                                enabled: !root.update-checking;
+                                text: root.update-checking ? "Checking…" : root.update-error && !root.update-download-failed ? "Retry" : "Check now";
+                                enabled: !root.update-checking && !root.update-downloading;
                                 clicked => { root.check-updates(); }
                             }
-                            if root.update-version != "" && root.update-installable: Button {
-                                text: "Update";
+                            if root.update-version != "" && root.update-installable && !root.update-downloading && !root.update-ready: Button {
+                                text: root.update-download-failed ? "Retry update" : "Update";
                                 primary: true;
+                                enabled: !root.installation-busy;
                                 clicked => { root.start-update(); }
+                            }
+                            if root.update-downloading: Button {
+                                text: "Cancel download";
+                                clicked => { root.cancel-update(); }
                             }
                             if root.update-version != "": Button {
                                 text: "Release notes";

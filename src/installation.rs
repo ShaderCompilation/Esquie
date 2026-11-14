@@ -196,7 +196,14 @@ fn scan(
 }
 
 pub fn preferred_executable() -> io::Result<PathBuf> {
-    if let Some(p) = Settings::load().installed_path {
+    selected_executable(&Settings::load())
+}
+
+/// The persistent copy that launchers, autostart, and updates target: the
+/// remembered installed copy after a handoff, otherwise this AppImage's file.
+/// Never the temporary mount.
+pub fn selected_executable(settings: &Settings) -> io::Result<PathBuf> {
+    if let Some(p) = settings.installed_path.clone() {
         if p.is_file() {
             return Ok(p);
         }
@@ -285,7 +292,9 @@ fn stage_integration(
     let external = inventory.launchers.iter().any(|l| !l.owned || !l.user);
     // Respect managers' existing launchers rather than creating a duplicate.
     if !owned.is_empty() || !external {
-        let icon = locations.data.join("icons/hicolor/scalable/apps/esquie.svg");
+        let icon = locations
+            .data
+            .join("icons/hicolor/scalable/apps/esquie.svg");
         if icon.exists()
             && fs::read(&icon)? != include_bytes!("../ui/icon.svg")
             && (owned.is_empty() || external)
@@ -348,7 +357,9 @@ pub fn remove_launchers(locations: &Locations, inventory: &Inventory) -> io::Res
             removed = true;
         }
     }
-    let icon = locations.data.join("icons/hicolor/scalable/apps/esquie.svg");
+    let icon = locations
+        .data
+        .join("icons/hicolor/scalable/apps/esquie.svg");
     if removed
         && !inventory.launchers.iter().any(|l| !l.owned || !l.user)
         && fs::read(&icon).is_ok_and(|b| b == include_bytes!("../ui/icon.svg"))
@@ -590,7 +601,12 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), text);
         assert_eq!(fs::read_to_string(startup).unwrap(), text);
-        assert!(!s.locations.data.join("applications/esquie.desktop").exists());
+        assert!(
+            !s.locations
+                .data
+                .join("applications/esquie.desktop")
+                .exists()
+        );
     }
 
     #[test]

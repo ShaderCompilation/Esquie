@@ -2,7 +2,11 @@
 //! and the daily schedule. Everything here runs on the updater thread; the UI and
 //! audio threads never wait on the network. Microphone processing stays offline.
 
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -54,6 +58,7 @@ pub enum Error {
     Checksum(String),
     Signature(String),
     Write(String),
+    Cancelled,
 }
 
 impl std::fmt::Display for Error {
@@ -88,6 +93,7 @@ impl std::fmt::Display for Error {
                 "The release signature is not valid, so it cannot be offered: {detail}."
             ),
             Error::Write(detail) => write!(f, "Could not write the download: {detail}."),
+            Error::Cancelled => write!(f, "The download was cancelled."),
         }
     }
 }
@@ -333,16 +339,22 @@ fn parse_checksum(body: &[u8], expected: &str) -> Result<[u8; 32], Error> {
     Ok(digest)
 }
 
-/// Stream a release's AppImage into `out`, hashing as it goes. The caller owns
-/// staging and must discard `out` on any error. Wired into replacement by the
-/// installer. Authenticity comes from `check`, which only builds a `Release`
-/// from a checksum signed with the release key.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Stream a release's AppImage into `out`, hashing as it goes, and report the
+/// bytes received so far through `progress`. Stops with `Cancelled` soon after
+/// `cancel` is set. The caller owns `out` and must discard it on any error.
+/// Authenticity comes from `check`, which only builds a `Release` from a
+/// checksum signed with the release key; this verifies the bytes against it.
 pub fn download(
     transport: &dyn Transport,
     release: &Release,
     out: &mut dyn Write,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
 ) -> Result<u64, Error> {
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let reply = transport.get(&release.appimage.url, false)?;
     status(&reply)?;
     let mut body = reply.body.take(release.appimage.size + 1);
@@ -350,6 +362,9 @@ pub fn download(
     let mut buffer = vec![0u8; 64 << 10];
     let mut total = 0u64;
     loop {
+        if cancelled() {
+            return Err(Error::Cancelled);
+        }
         let n = match body.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => n,
@@ -361,8 +376,8 @@ pub fn download(
             return Err(Error::TooLarge);
         }
         hasher.update(&buffer[..n]);
-        out.write_all(&buffer[..n])
-            .map_err(|e| Error::Write(e.to_string()))?;
+        out.write_all(&buffer[..n]).map_err(write_error)?;
+        progress(total);
     }
     if total != release.appimage.size {
         return Err(Error::Checksum(format!(
@@ -374,6 +389,72 @@ pub fn download(
         return Err(Error::Checksum("the download does not match it".into()));
     }
     Ok(total)
+}
+
+fn write_error(e: io::Error) -> Error {
+    Error::Write(match e.kind() {
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
+            "there is not enough free disk space".into()
+        }
+        _ => e.to_string(),
+    })
+}
+
+/// The files `stage` uses beside `target`: the partial download, and the
+/// verified AppImage awaiting replacement. Hidden, and named for the version.
+pub fn staging_paths(target: &Path, version: &Version) -> Option<(PathBuf, PathBuf)> {
+    let dir = target.parent().filter(|d| !d.as_os_str().is_empty())?;
+    Some((
+        dir.join(format!(".esquie-update-{version}.part")),
+        dir.join(format!(".esquie-update-{version}")),
+    ))
+}
+
+/// Download `release` beside `target`, which is never touched here, so a later
+/// replacement is a same-directory rename. Returns the verified, executable
+/// AppImage. On any failure or cancellation the partial file is removed and
+/// nothing else changes. One Esquie runs at a time (the instance lock), so a
+/// leftover partial file belongs to an interrupted earlier attempt.
+pub fn stage(
+    transport: &dyn Transport,
+    release: &Release,
+    target: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<PathBuf, Error> {
+    let (partial, ready) = staging_paths(target, &release.version)
+        .ok_or_else(|| Error::Write(format!("{} has no directory", target.display())))?;
+    let unwritable = |e: io::Error| {
+        let dir = partial.parent().unwrap_or(Path::new("/")).display();
+        match e.kind() {
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+                Error::Write(format!("{dir} is not writable by you ({e})"))
+            }
+            _ => write_error(e),
+        }
+    };
+    match fs::remove_file(&partial) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(unwritable(e)),
+        _ => {}
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)
+        .map_err(unwritable)?;
+    let result = download(transport, release, &mut file, cancel, progress).and_then(|_| {
+        file.set_permissions(fs::Permissions::from_mode(0o755))
+            .and_then(|()| file.sync_all())
+            .map_err(write_error)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        fs::rename(&partial, &ready).map_err(write_error)
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    result.map(|()| ready)
 }
 
 pub fn unix_now() -> u64 {
@@ -975,10 +1056,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn download_streams_and_verifies() {
-        let payload = vec![7u8; 200_000];
-        let mut release = Release {
+    fn artifact_release(payload: &[u8]) -> Release {
+        Release {
             version: v("0.2.0"),
             page: String::new(),
             appimage: Asset {
@@ -986,32 +1065,194 @@ mod tests {
                 url: "artifact".into(),
                 size: payload.len() as u64,
             },
-            sha256: Sha256::digest(&payload).into(),
-        };
+            sha256: Sha256::digest(payload).into(),
+        }
+    }
+
+    fn fetch_all(fake: &Fake, release: &Release, out: &mut Vec<u8>) -> Result<u64, Error> {
+        download(fake, release, out, &AtomicBool::new(false), &mut |_| {})
+    }
+
+    #[test]
+    fn download_streams_and_verifies() {
+        let payload = vec![7u8; 200_000];
+        let mut release = artifact_release(&payload);
         let fake = Fake::default().with("artifact", Fixture::Ok(payload.clone()));
         let mut out = Vec::new();
-        assert_eq!(
-            download(&fake, &release, &mut out),
-            Ok(payload.len() as u64)
+        let mut reported = Vec::new();
+        let result = download(
+            &fake,
+            &release,
+            &mut out,
+            &AtomicBool::new(false),
+            &mut |n| reported.push(n),
         );
+        assert_eq!(result, Ok(payload.len() as u64));
         assert_eq!(out, payload);
+        // Progress rises monotonically to the full size.
+        assert!(reported.len() > 1);
+        assert!(reported.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(reported.last(), Some(&(payload.len() as u64)));
 
         release.sha256[0] ^= 1;
         assert!(matches!(
-            download(&fake, &release, &mut Vec::new()),
+            fetch_all(&fake, &release, &mut Vec::new()),
             Err(Error::Checksum(_))
         ));
         release.sha256[0] ^= 1;
         release.appimage.size -= 1;
         assert_eq!(
-            download(&fake, &release, &mut Vec::new()),
+            fetch_all(&fake, &release, &mut Vec::new()),
             Err(Error::TooLarge)
         );
         release.appimage.size += 2;
         assert!(matches!(
-            download(&fake, &release, &mut Vec::new()),
+            fetch_all(&fake, &release, &mut Vec::new()),
             Err(Error::Checksum(_))
         ));
+    }
+
+    #[test]
+    fn download_stops_promptly_when_cancelled() {
+        let payload = vec![7u8; 1 << 20];
+        let release = artifact_release(&payload);
+        let fake = Fake::default().with("artifact", Fixture::Ok(payload));
+        let cancel = AtomicBool::new(false);
+        let mut out = Vec::new();
+        let result = download(&fake, &release, &mut out, &cancel, &mut |n| {
+            if n >= 128 << 10 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(result, Err(Error::Cancelled));
+        assert!(out.len() < 256 << 10, "stopped after the next read");
+        // Already cancelled: no request at all.
+        let calls = fake.calls.load(Ordering::SeqCst);
+        assert_eq!(
+            download(&fake, &release, &mut Vec::new(), &cancel, &mut |_| {}),
+            Err(Error::Cancelled)
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "esquie-stage-{name}-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn stage_writes_a_verified_executable_beside_the_target() {
+        let dir = scratch("ok");
+        let target = dir.join("esquie");
+        fs::write(&target, b"current").unwrap();
+        let payload = vec![9u8; 300_000];
+        let release = artifact_release(&payload);
+        let fake = Fake::default().with("artifact", Fixture::Ok(payload.clone()));
+        let (partial, ready) = staging_paths(&target, &release.version).unwrap();
+        // An abandoned partial file from an interrupted attempt is replaced.
+        fs::write(&partial, b"stale").unwrap();
+
+        let staged = stage(
+            &fake,
+            &release,
+            &target,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+        assert_eq!(staged.as_ref(), Ok(&ready));
+        assert_eq!(fs::read(&ready).unwrap(), payload);
+        assert_eq!(
+            fs::metadata(&ready).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(!partial.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"current", "target untouched");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_or_cancelled_staging_leaves_only_the_target() {
+        let dir = scratch("fail");
+        let target = dir.join("esquie");
+        fs::write(&target, b"current").unwrap();
+        let payload = vec![9u8; 300_000];
+        let release = artifact_release(&payload);
+        let only_target = || {
+            let names: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(names, ["esquie"]);
+            assert_eq!(fs::read(&target).unwrap(), b"current");
+        };
+
+        // Corrupted bytes fail verification.
+        let mut corrupt = payload.clone();
+        corrupt[1000] ^= 1;
+        let fake = Fake::default().with("artifact", Fixture::Ok(corrupt));
+        let never = AtomicBool::new(false);
+        assert!(matches!(
+            stage(&fake, &release, &target, &never, &mut |_| {}),
+            Err(Error::Checksum(_))
+        ));
+        only_target();
+
+        // Network failure before any bytes arrive.
+        let offline = Fake::default().with("artifact", Fixture::Fail(Error::Timeout));
+        assert_eq!(
+            stage(&offline, &release, &target, &never, &mut |_| {}),
+            Err(Error::Timeout)
+        );
+        only_target();
+
+        // Cancelled midway.
+        let fake = Fake::default().with("artifact", Fixture::Ok(payload));
+        let cancel = AtomicBool::new(false);
+        let result = stage(&fake, &release, &target, &cancel, &mut |_| {
+            cancel.store(true, Ordering::Relaxed)
+        });
+        assert_eq!(result, Err(Error::Cancelled));
+        only_target();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stage_reports_an_unwritable_directory() {
+        let dir = scratch("readonly");
+        let target = dir.join("esquie");
+        fs::write(&target, b"current").unwrap();
+        let release = artifact_release(b"new");
+        let fake = Fake::default().with("artifact", Fixture::Ok(b"new".to_vec()));
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores directory permissions, so the check only applies otherwise.
+        let enforced = fs::write(dir.join("probe"), b"").is_err();
+        let result = stage(
+            &fake,
+            &release,
+            &target,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        if enforced {
+            match result {
+                Err(Error::Write(detail)) => assert!(detail.contains("not writable"), "{detail}"),
+                other => panic!("unexpected result: {other:?}"),
+            }
+            assert_eq!(
+                fake.calls.load(Ordering::SeqCst),
+                0,
+                "fails before downloading"
+            );
+        }
+        assert!(staging_paths(Path::new("esquie"), &release.version).is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

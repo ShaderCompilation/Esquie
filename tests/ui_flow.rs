@@ -596,6 +596,42 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_update_status("Checking GitHub for updates…".into());
     capture(&ui, "16-update-settings-checking");
     ui.set_update_checking(false);
+
+    // A download in progress shows progress and Cancel, never a second Update.
+    let cancels = Arc::new(Mutex::new(0));
+    let observed = cancels.clone();
+    ui.on_cancel_update(move || *observed.lock().unwrap() += 1);
+    ui.set_update_version("0.2.0".into());
+    ui.set_update_installable(true);
+    ui.set_update_downloading(true);
+    ui.set_update_progress(0.4);
+    ui.set_update_status(
+        "Downloading Esquie 0.2.0: 38.0 of 95.0 MB (40%). Esquie and your microphone keep working meanwhile.".into(),
+    );
+    key(&ui, Key::End);
+    capture(&ui, "16-update-downloading");
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "Update")
+            .next()
+            .is_none()
+    );
+    click(&ui, "Cancel download");
+    assert_eq!(*cancels.lock().unwrap(), 1);
+    // A failed download offers Retry update, distinct from a failed check.
+    ui.set_update_downloading(false);
+    ui.set_update_error(true);
+    ui.set_update_download_failed(true);
+    ui.set_update_status(
+        "GitHub did not respond in time. Try again later. Your current copy is unchanged.".into(),
+    );
+    capture(&ui, "16-update-download-failed");
+    click(&ui, "Retry update");
+    assert_eq!(updates.lock().unwrap().last(), Some(&"update"));
+    click(&ui, "Check now");
+    assert_eq!(updates.lock().unwrap().last(), Some(&"check"));
+    ui.set_update_error(false);
+    ui.set_update_download_failed(false);
+    ui.set_update_version("".into());
     ui.set_update_status("".into());
     ui.set_automatic_checks(true);
     key(&ui, Key::Escape);

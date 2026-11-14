@@ -6,6 +6,7 @@ mod dsp;
 mod file_ops;
 mod installation;
 mod installation_ui;
+mod jobs;
 mod logging;
 mod settings;
 mod single_instance;
@@ -113,10 +114,12 @@ fn main() -> anyhow::Result<()> {
         ui.window().set_size(LogicalSize::new(w as f32, h as f32));
     }
     ui.set_autostart(autostart::is_enabled());
-    let handoff = installation_ui::setup(&ui, settings.clone());
+    // Installation and update jobs never run at the same time.
+    let jobs = Arc::new(jobs::Jobs::default());
+    let handoff = installation_ui::setup(&ui, settings.clone(), jobs.clone());
     diagnostics::setup(&ui, crashed_last_run);
-    // Kept until quit; dropping it lets the updater thread end without being joined.
-    let updates = update_ui::setup(&ui, settings.clone());
+    // Kept until quit, then shut down without waiting on the network.
+    let updates = update_ui::setup(&ui, settings.clone(), jobs);
 
     {
         let settings = settings.clone();
@@ -384,11 +387,12 @@ fn main() -> anyhow::Result<()> {
     }
     slint::run_event_loop_until_quit()?;
 
+    // Cancel a download first; it cleans up while the tray shuts down.
+    updates.shutdown();
     if let Some(t) = tray {
         t.shutdown().wait();
     }
 
-    drop(updates);
     let _ = cmd_tx.send(Command::Quit);
     let _ = audio_thread.join();
     // The old microphone is gone before another process creates its replacement.
