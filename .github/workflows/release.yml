@@ -1,0 +1,129 @@
+name: Tagged release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  appimage-build:
+    name: Build release candidate / x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build on the oldest supported baseline and inspect payload
+        env:
+          CONTAINER_ENGINE: docker
+          CARGO_BUILD_JOBS: 2
+        run: bash packaging/appimage/build.sh
+      - name: Upload candidate and checksums for publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage-candidate-x86_64
+          path: |
+            target/appimage/*.AppImage
+            target/appimage/*.AppImage.sha256
+          if-no-files-found: error
+      - name: Upload packaging evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage-build-evidence
+          path: target/appimage/evidence/
+          if-no-files-found: error
+
+  appimage-test:
+    name: Candidate runtime / ${{ matrix.image }}
+    needs: appimage-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "ubuntu:26.04", "debian:13", "fedora:44", "fedora:45", "archlinux:base"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: appimage-candidate-x86_64
+          path: target/appimage/
+      - name: Verify checksum and exercise extracted payload without FUSE
+        env:
+          CONTAINER_ENGINE: docker
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: bash packaging/appimage/test.sh "$DISTRO_IMAGE"
+      - name: Name validation evidence
+        if: always()
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: echo "EVIDENCE_ID=${DISTRO_IMAGE//[:\/]/-}" >> "$GITHUB_ENV"
+      - name: Upload candidate runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage-runtime-${{ env.EVIDENCE_ID }}
+          path: target/appimage/test/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [appimage-build, appimage-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: appimage-candidate-x86_64
+          path: target/appimage/
+      - name: Verify candidate checksum before publishing
+        run: |
+          cd target/appimage
+          sha256sum --check ./*.sha256
+      - name: Create release with AppImage and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          appimage="Esquie-${version}-x86_64.AppImage"
+          checksum="$(sha256sum "target/appimage/${appimage}" | cut -d' ' -f1)"
+          cat > target/release-notes.md <<EOF
+          Esquie ${version} for Linux x86_64.
+
+          ## Download
+
+          - \`${appimage}\` — the application
+          - \`${appimage}.sha256\` — SHA-256 checksum
+
+          ## Verify and run
+
+          \`\`\`sh
+          sha256sum --check ${appimage}.sha256
+          chmod +x ${appimage}
+          ./${appimage}
+          \`\`\`
+
+          SHA-256: \`${checksum}\`
+
+          ## Prerequisites
+
+          x86_64, glibc 2.39+, PipeWire 1.0+, and Wayland or X11. Host
+          prerequisites and instructions are in
+          [docs/appimage.md](https://github.com/ShaderCompilation/Esquie/blob/${TAG}/docs/appimage.md).
+
+          ## Source and licenses
+
+          Esquie is GPL-3.0-only. The complete corresponding source for this
+          binary is the [${TAG} tag](https://github.com/ShaderCompilation/Esquie/tree/${TAG})
+          of this repository. Embedded third-party components retain their own
+          licenses; see THIRD_PARTY_NOTICES.md in the source tree.
+          EOF
+          gh release create "$TAG" \
+            "target/appimage/${appimage}" \
+            "target/appimage/${appimage}.sha256" \
+            --title "Esquie ${version}" \
+            --notes-file target/release-notes.md
