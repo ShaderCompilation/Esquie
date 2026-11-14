@@ -18,6 +18,9 @@ out=$repo/target/appimage
 work=$out/work
 rm -rf "$out"
 mkdir -p "$work/tools" "$out/evidence"
+# Resolved by build.sh on the host, where the container engine lives.
+echo "${esquie_image_digest:?packaging/appimage/build.sh must pass esquie_image_digest}" \
+    > "$out/evidence/image.txt"
 
 bash ci/install-deps.sh
 # appimagetool identifies the payload's architecture with file(1).

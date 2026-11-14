@@ -30,11 +30,13 @@ if [[ -n ${esquie_cargo_cache:-} && -n ${esquie_rustup_cache:-} ]]; then
 fi
 
 # label=disable lets SELinux hosts mount the checkout without relabeling it.
+# The digest is passed in so the container can record it in the evidence
+# directory it owns; after a rootful build the host user cannot write there.
 "$engine" run --rm --platform linux/amd64 \
     --security-opt label=disable \
     --env CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(nproc)}" \
+    --env esquie_image_digest="$digest" \
     "${cache_args[@]}" \
     --volume "$PWD:/workspace" --workdir /workspace \
     "$digest" bash packaging/appimage/container-build.sh
-echo "$digest" > target/appimage/evidence/image.txt
 ls -l target/appimage/*.AppImage*

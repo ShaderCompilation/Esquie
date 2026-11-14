@@ -603,10 +603,16 @@ mod tests {
         let old = fs::read(&launcher).unwrap();
         let startup = s.locations.config.join("autostart/esquie.desktop");
         put(&startup, desktop_entry::autostart(&s.image).unwrap());
-        let directory = startup.parent().unwrap();
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
+        // A directory at the shared icon path fails staging for every user:
+        // a read-only parent directory would not stop root, which runs the
+        // tests inside the CI containers.
+        let icon = s
+            .locations
+            .data
+            .join("icons/hicolor/scalable/apps/esquie.svg");
+        fs::remove_file(&icon).unwrap();
+        fs::create_dir(&icon).unwrap();
         let result = install(&s.locations, &s.inventory(), &s.locations.default_bin, true);
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(result.is_err());
         assert_eq!(fs::read(target).unwrap(), b"previous binary");
         assert_eq!(fs::read(launcher).unwrap(), old);
