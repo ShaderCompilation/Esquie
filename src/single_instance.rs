@@ -85,9 +85,17 @@ pub fn acquire() -> Acquired {
 }
 
 /// Ping a running instance to show its window. True if one answered.
+///
+/// A successful connect alone proves a live listener (a stale socket file
+/// refuses connections), and the listener reveals on accept. The write is
+/// best-effort: the listener may accept and close the stream before it
+/// lands, which must not be mistaken for a crashed instance.
 fn ask_to_reveal(path: &Path) -> bool {
     match UnixStream::connect(path) {
-        Ok(mut stream) => stream.write_all(b"reveal").is_ok(),
+        Ok(mut stream) => {
+            let _ = stream.write_all(b"reveal");
+            true
+        }
         Err(_) => false,
     }
 }
