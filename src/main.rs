@@ -8,6 +8,7 @@ mod installation;
 mod installation_ui;
 mod jobs;
 mod logging;
+mod replacement;
 mod settings;
 mod single_instance;
 mod tray;
@@ -119,7 +120,8 @@ fn main() -> anyhow::Result<()> {
     let handoff = installation_ui::setup(&ui, settings.clone(), jobs.clone());
     diagnostics::setup(&ui, crashed_last_run);
     // Kept until quit, then shut down without waiting on the network.
-    let updates = update_ui::setup(&ui, settings.clone(), jobs);
+    // Restart now after an update reuses the installation handoff.
+    let updates = update_ui::setup(&ui, settings.clone(), jobs, handoff.clone());
 
     {
         let settings = settings.clone();
@@ -386,6 +388,15 @@ fn main() -> anyhow::Result<()> {
         reveal_without_tray_later(&ui);
     }
     slint::run_event_loop_until_quit()?;
+    let handoff = handoff.lock().unwrap().take();
+    if handoff.is_some() {
+        // The successor reads these; keep the current window size too.
+        if ui.window().is_visible() {
+            save_window_size(&ui, &settings);
+        } else {
+            settings.lock().unwrap().save();
+        }
+    }
 
     // Cancel a download first; it cleans up while the tray shuts down.
     updates.shutdown();
@@ -396,8 +407,9 @@ fn main() -> anyhow::Result<()> {
     let _ = cmd_tx.send(Command::Quit);
     let _ = audio_thread.join();
     // The old microphone is gone before another process creates its replacement.
-    // Installation alone never gets here with a handoff target.
-    if let Some(target) = handoff.lock().unwrap().take() {
+    // Only an explicit switch or restart (never installation or an update
+    // alone) gets here with a handoff target.
+    if let Some(target) = handoff {
         // Release the instance lock first so the successor can claim it.
         if let Some(reveal) = reveal {
             reveal.unbind();

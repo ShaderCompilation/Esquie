@@ -58,6 +58,10 @@ pub enum Error {
     Checksum(String),
     Signature(String),
     Write(String),
+    /// Replacing the selected copy failed; it is unchanged.
+    Install(String),
+    /// The selected copy changed after the update started; nothing was replaced.
+    TargetChanged(String),
     Cancelled,
 }
 
@@ -93,7 +97,13 @@ impl std::fmt::Display for Error {
                 "The release signature is not valid, so it cannot be offered: {detail}."
             ),
             Error::Write(detail) => write!(f, "Could not write the download: {detail}."),
-            Error::Cancelled => write!(f, "The download was cancelled."),
+            Error::Install(detail) => write!(f, "Could not install the update: {detail}."),
+            Error::TargetChanged(path) => write!(
+                f,
+                "{path} changed while the update was in progress (another tool may have \
+                 updated or moved it), so it was left as it is. Check for updates again."
+            ),
+            Error::Cancelled => write!(f, "The update was cancelled."),
         }
     }
 }
@@ -1133,6 +1143,33 @@ mod tests {
             Err(Error::Cancelled)
         );
         assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    }
+
+    #[test]
+    fn download_reports_a_full_disk() {
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::StorageFull, "no space"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let payload = vec![7u8; 1000];
+        let release = artifact_release(&payload);
+        let fake = Fake::default().with("artifact", Fixture::Ok(payload));
+        let result = download(
+            &fake,
+            &release,
+            &mut Full,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+        assert_eq!(
+            result,
+            Err(Error::Write("there is not enough free disk space".into()))
+        );
     }
 
     fn scratch(name: &str) -> PathBuf {

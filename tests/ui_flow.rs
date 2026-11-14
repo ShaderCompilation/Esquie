@@ -631,6 +631,48 @@ fn microphone_sound_check_and_settings_flow() {
     assert_eq!(updates.lock().unwrap().last(), Some(&"check"));
     ui.set_update_error(false);
     ui.set_update_download_failed(false);
+
+    // Replacement cannot be cancelled once it is installing.
+    ui.set_update_downloading(true);
+    ui.set_update_installing(true);
+    ui.set_update_status("Installing Esquie 0.2.0…".into());
+    let no_button = |label| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .is_none()
+    };
+    assert!(no_button("Cancel download"));
+    ui.set_update_downloading(false);
+    ui.set_update_installing(false);
+
+    // Installed: Restart now and Later, and no further checks or updates.
+    let restarts = Arc::new(Mutex::new(0));
+    let observed = restarts.clone();
+    ui.on_restart_update(move || *observed.lock().unwrap() += 1);
+    ui.set_update_ready(true);
+    ui.set_update_status(
+        "Esquie 0.2.0 is installed at /home/user/.local/bin/esquie. This session keeps running the current version until you restart. Restarting briefly interrupts the virtual microphone; Later keeps it running, and Esquie 0.2.0 starts next time. The previous version is kept at /home/user/.local/bin/.esquie.previous.".into(),
+    );
+    key(&ui, Key::End);
+    capture(&ui, "16-update-installed");
+    assert!(no_button("Update") && no_button("Retry update"));
+    click(&ui, "Later");
+    assert!(ui.get_update_restart_deferred());
+    assert!(no_button("Later"));
+    click(&ui, "Restart now");
+    assert_eq!(*restarts.lock().unwrap(), 1);
+    // The microphone view offers the restart too, until Later.
+    ui.set_update_restart_deferred(false);
+    ui.set_settings_open(false);
+    key(&ui, Key::Home);
+    capture(&ui, "16-update-restart-notice");
+    click(&ui, "Restart now");
+    assert_eq!(*restarts.lock().unwrap(), 2);
+    click(&ui, "Later");
+    assert!(ui.get_update_restart_deferred());
+    ui.set_update_ready(false);
+    ui.set_update_restart_deferred(false);
+    ui.set_settings_open(true);
     ui.set_update_version("".into());
     ui.set_update_status("".into());
     ui.set_automatic_checks(true);

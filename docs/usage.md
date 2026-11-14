@@ -35,6 +35,9 @@ Keep Esquie running while you use it. For installation and updates, see
   and remove Esquie-owned menu launchers. Installation keeps audio running;
   switching to the installed copy is explicit. **About and updates** shows the
   version, the latest check result, **Check now**, and the automatic-check toggle.
+  **Update** downloads and installs a verified release over the selected copy
+  while audio keeps running; **Restart now** switches to it, and **Later** waits
+  until the next start. See [updating](appimage.md#updating).
 
 The header stays visible while pages scroll. Use **Done** or **Back**, or press
 Escape, to return. Tab moves between controls; Page Up/Down and Home/End scroll

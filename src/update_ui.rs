@@ -1,6 +1,7 @@
 //! Update UI: Settings status, the notice, and the updater threads' lifecycle.
-//! Network checks run on the updater thread and downloads on their own thread;
-//! this module only starts, cancels, and reacts to them.
+//! Network checks run on the updater thread; downloading and replacing the
+//! selected AppImage run on their own thread. This module only starts,
+//! cancels, and reacts to them, and hands a restart to `main`.
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -16,6 +17,7 @@ use crate::{
     AppWindow,
     installation::{self, Inventory, Kind, Locations},
     jobs::{Job, Jobs},
+    replacement::{self, Installed, Target},
     settings::Settings,
     updater::{self, Outcome, Release, Report, Request},
 };
@@ -24,6 +26,9 @@ use crate::{
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
 /// How long quit waits for a cancelled download to clean up after itself.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+/// A replacement past its commit point is local renames; quit waits for it,
+/// but never forever.
+const COMMIT_LIMIT: Duration = Duration::from_secs(30);
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
@@ -37,24 +42,24 @@ struct State {
     /// "Later" hides the notice for this version until the next launch.
     dismissed: Option<semver::Version>,
     download: Option<Download>,
-    staged: Option<Staged>,
+    installed: Option<Update>,
 }
 
-/// The download in progress. At most one exists, and it holds the job slot it
-/// shares with installation.
+/// The update job in progress: download, verification, then replacement. At
+/// most one exists, and it holds the job slot it shares with installation.
 struct Download {
     cancel: Arc<AtomicBool>,
+    /// Set once replacement passed the point where it can be cancelled.
+    committing: Arc<AtomicBool>,
     thread: JoinHandle<()>,
     partial: PathBuf,
 }
 
-/// A downloaded AppImage whose digest matched the signed checksum, waiting
-/// beside the copy it replaces.
-#[allow(dead_code)] // `path` and `target` are read by replacement.
-struct Staged {
+/// An update that replaced the selected copy and awaits a restart.
+struct Update {
     version: semver::Version,
-    path: PathBuf,
-    target: PathBuf,
+    /// The selected persistent path, launched by Restart now.
+    selected: PathBuf,
 }
 
 /// Keeps the update machinery alive until quit; see [`Updates::shutdown`].
@@ -69,27 +74,66 @@ impl Updates {
     /// download is cancelled and gets a short grace period to remove its
     /// partial file; a download stuck in a slow read has the file removed
     /// for it (it writes through its open handle until the process exits).
+    /// A replacement already committing is allowed to finish.
     pub fn shutdown(self) {
         drop(self.requests);
         let Some(download) = self.state.borrow_mut().download.take() else {
             return;
         };
         download.cancel.store(true, Ordering::Relaxed);
-        let deadline = Instant::now() + SHUTDOWN_GRACE;
-        while !download.thread.is_finished() && Instant::now() < deadline {
+        let started = Instant::now();
+        while !download.thread.is_finished() {
+            let committing = download.committing.load(Ordering::Relaxed);
+            let limit = if committing {
+                COMMIT_LIMIT
+            } else {
+                SHUTDOWN_GRACE
+            };
+            if started.elapsed() >= limit {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
-        if !download.thread.is_finished() {
+        if download.thread.is_finished() {
+            return;
+        }
+        if download.committing.load(Ordering::Relaxed) {
+            tracing::warn!(
+                "update replacement still running at quit; the next start finishes cleanup"
+            );
+        } else {
             tracing::info!("update download still stopping at quit; removing its partial file");
             let _ = std::fs::remove_file(&download.partial);
         }
     }
 }
 
-/// Start the updater thread and wire the update controls.
-pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>, jobs: Arc<Jobs>) -> Updates {
+/// Start the updater thread and wire the update controls. Restart now puts
+/// the updated copy in `handoff` and ends the event loop; `main` then stops
+/// audio, releases the instance lock, and launches it.
+pub fn setup(
+    ui: &AppWindow,
+    settings: Arc<Mutex<Settings>>,
+    jobs: Arc<Jobs>,
+    handoff: Arc<Mutex<Option<PathBuf>>>,
+) -> Updates {
     ui.set_automatic_checks(lock(&settings).automatic_checks);
     let state = Rc::new(RefCell::new(State::default()));
+    if let Some(newer) = lock(&settings).written_by_newer() {
+        tracing::warn!("settings were last saved by newer Esquie {newer}");
+        let copy = Settings::newer_copy_path(&newer)
+            .map_or_else(String::new, |p| format!(" at {}", p.display()));
+        ui.set_update_status(
+            format!(
+                "Your settings were last saved by Esquie {newer}, which is newer than this copy ({}). \
+                 Settings this version does not recognize are kept, and the original file is \
+                 copied{copy} before this version first changes anything.",
+                env!("CARGO_PKG_VERSION")
+            )
+            .into(),
+        );
+    }
+    clean_abandoned_later(settings.clone(), jobs.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = {
         let settings = settings.clone();
@@ -126,7 +170,7 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>, jobs: Arc<Jobs>) ->
         let tx = tx.clone();
         ui.on_check_updates(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if ui.get_update_checking() {
+            if ui.get_update_checking() || ui.get_update_ready() {
                 return;
             }
             match tx.as_ref().map(|tx| tx.send(Request::CheckNow)) {
@@ -200,11 +244,41 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>, jobs: Arc<Jobs>) ->
         let weak = ui.as_weak();
         ui.on_cancel_update(move || {
             if let Some(download) = &state.borrow().download {
+                if download.committing.load(Ordering::Relaxed) {
+                    return;
+                }
                 download.cancel.store(true, Ordering::Relaxed);
                 if let Some(ui) = weak.upgrade() {
-                    ui.set_update_status("Cancelling the download…".into());
+                    ui.set_update_status("Cancelling the update…".into());
                 }
             }
+        });
+    }
+    {
+        let state = state.clone();
+        let weak = ui.as_weak();
+        ui.on_restart_update(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let Some(update) = &st.installed else { return };
+            if !update.selected.is_file() {
+                ui.set_update_error(true);
+                ui.set_update_status(
+                    format!(
+                        "{} is missing, so Esquie cannot restart into it. Start Esquie again from your menu.",
+                        update.selected.display()
+                    )
+                    .into(),
+                );
+                return;
+            }
+            tracing::info!(
+                "restarting into Esquie {} at {}",
+                update.version,
+                update.selected.display()
+            );
+            *lock(&handoff) = Some(update.selected.clone());
+            let _ = slint::quit_event_loop();
         });
     }
     {
@@ -224,8 +298,9 @@ pub fn setup(ui: &AppWindow, settings: Arc<Mutex<Settings>>, jobs: Arc<Jobs>) ->
     }
 }
 
-/// Start downloading the offered release beside the selected persistent copy.
-/// Ignored while a download runs; refused while an installation runs.
+/// Download the offered release beside the selected persistent copy, then
+/// replace that copy. Ignored while an update runs; refused while an
+/// installation runs.
 fn start_download(
     ui: &AppWindow,
     state: &Rc<RefCell<State>>,
@@ -233,7 +308,7 @@ fn start_download(
     jobs: &Arc<Jobs>,
 ) -> Result<(), String> {
     let mut st = state.borrow_mut();
-    if st.download.is_some() {
+    if st.download.is_some() || st.installed.is_some() {
         return Ok(());
     }
     let Some(release) = st.release.clone() else {
@@ -243,62 +318,122 @@ fn start_download(
     if !installable {
         return Err(instructions);
     }
-    let target = installation::selected_executable(&lock(settings))
+    let selected = installation::selected_executable(&lock(settings))
         .map_err(|e| format!("Could not find the copy to update: {e}"))?;
-    let (partial, _) = updater::staging_paths(&target, &release.version)
-        .ok_or_else(|| format!("{} has no directory to update in.", target.display()))?;
+    // Staging goes beside the file the selection resolves to, so the final
+    // rename stays within one directory.
+    let resolved = std::fs::canonicalize(&selected)
+        .map_err(|e| format!("Could not find the copy to update: {e}"))?;
+    let (partial, _) = updater::staging_paths(&resolved, &release.version)
+        .ok_or_else(|| format!("{} has no directory to update in.", resolved.display()))?;
     let guard = jobs.begin(Job::Update).map_err(|_| {
         "Esquie is installing or repairing a copy. Update once that finishes.".to_string()
     })?;
     let cancel = Arc::new(AtomicBool::new(false));
+    let committing = Arc::new(AtomicBool::new(false));
     let thread = {
         let cancel = cancel.clone();
+        let committing = committing.clone();
         let weak = ui.as_weak();
         let release = release.clone();
-        let target = target.clone();
         std::thread::Builder::new()
             .name("esquie-update-download".into())
             .spawn(move || {
-                let transport = updater::Http::new();
-                let total = release.appimage.size;
-                let mut reported: Option<Instant> = None;
-                let mut progress = |done: u64| {
-                    if done < total && reported.is_some_and(|t| t.elapsed() < PROGRESS_INTERVAL) {
-                        return;
-                    }
-                    reported = Some(Instant::now());
-                    let version = release.version.clone();
-                    let _ = weak
-                        .upgrade_in_event_loop(move |ui| show_progress(&ui, &version, done, total));
-                };
-                tracing::info!(
-                    "downloading {} beside {}",
-                    release.appimage.name,
-                    target.display()
-                );
-                let result = updater::stage(&transport, &release, &target, &cancel, &mut progress);
+                let result = run_update(&release, &selected, &cancel, &committing, &weak);
                 match &result {
-                    Ok(path) => tracing::info!("update verified at {}", path.display()),
-                    Err(e) => tracing::info!("update download stopped: {e}"),
+                    Ok((target, _)) => tracing::info!(
+                        "installed Esquie {} at {}",
+                        release.version,
+                        target.file.display()
+                    ),
+                    Err(e) => tracing::info!("update stopped: {e}"),
                 }
                 drop(guard);
-                let _ = weak
-                    .upgrade_in_event_loop(move |ui| finish_download(&ui, release, target, result));
+                let _ = weak.upgrade_in_event_loop(move |ui| finish_update(&ui, release, result));
             })
             .map_err(|e| format!("Could not start the download: {e}"))?
     };
     st.download = Some(Download {
         cancel,
+        committing,
         thread,
         partial,
     });
-    st.staged = None;
     ui.set_update_downloading(true);
+    ui.set_update_installing(false);
     ui.set_update_ready(false);
     ui.set_update_error(false);
     ui.set_update_download_failed(false);
     show_progress(ui, &release.version, 0, release.appimage.size);
     Ok(())
+}
+
+/// The update thread: record the target, download and verify beside it, then
+/// replace it. The verified download is removed if replacement fails.
+fn run_update(
+    release: &Release,
+    selected: &Path,
+    cancel: &AtomicBool,
+    committing: &AtomicBool,
+    weak: &slint::Weak<AppWindow>,
+) -> Result<(Target, Installed), updater::Error> {
+    let target = replacement::inspect(selected, cancel)?;
+    let transport = updater::Http::new();
+    let total = release.appimage.size;
+    let mut reported: Option<Instant> = None;
+    let mut progress = |done: u64| {
+        if done < total && reported.is_some_and(|t| t.elapsed() < PROGRESS_INTERVAL) {
+            return;
+        }
+        reported = Some(Instant::now());
+        let version = release.version.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| show_progress(&ui, &version, done, total));
+    };
+    tracing::info!(
+        "downloading {} beside {}",
+        release.appimage.name,
+        target.file.display()
+    );
+    let staged = updater::stage(&transport, release, &target.file, cancel, &mut progress)?;
+    let version = release.version.clone();
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        if ui.get_update_status().starts_with("Cancelling") {
+            return;
+        }
+        ui.set_update_installing(true);
+        ui.set_update_progress(1.0);
+        ui.set_update_status(format!("Installing Esquie {version}…").into());
+    });
+    let result = replacement::replace(&target, &staged, release, cancel, committing);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result.map(|installed| (target, installed))
+}
+
+/// Remove what an interrupted update left beside the selected AppImage. Runs
+/// once at startup, holding the job slot so no update starts meanwhile.
+fn clean_abandoned_later(settings: Arc<Mutex<Settings>>, jobs: Arc<Jobs>) {
+    let spawned = std::thread::Builder::new()
+        .name("esquie-update-cleanup".into())
+        .spawn(move || {
+            let Ok(_guard) = jobs.begin(Job::Update) else {
+                return;
+            };
+            if !manual_path().0 {
+                return;
+            }
+            let selected = installation::selected_executable(&lock(&settings));
+            let Ok(file) = selected.and_then(std::fs::canonicalize) else {
+                return;
+            };
+            for path in replacement::clean_abandoned(&file) {
+                tracing::info!("cleaned up after an interrupted update: {}", path.display());
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("could not start update cleanup: {e}");
+    }
 }
 
 fn megabytes(bytes: u64) -> String {
@@ -312,7 +447,10 @@ fn show_progress(ui: &AppWindow, version: &semver::Version, done: u64, total: u6
         done as f64 / total as f64
     };
     // A cancel request keeps its status until the thread reports back.
-    if !ui.get_update_downloading() || ui.get_update_status().starts_with("Cancelling") {
+    if !ui.get_update_downloading()
+        || ui.get_update_installing()
+        || ui.get_update_status().starts_with("Cancelling")
+    {
         return;
     }
     ui.set_update_progress(fraction as f32);
@@ -327,28 +465,29 @@ fn show_progress(ui: &AppWindow, version: &semver::Version, done: u64, total: u6
     );
 }
 
-fn finish_download(
+fn finish_update(
     ui: &AppWindow,
     release: Release,
-    target: PathBuf,
-    result: Result<PathBuf, updater::Error>,
+    result: Result<(Target, Installed), updater::Error>,
 ) {
     let Some(state) = STATE.with(|s| s.borrow().clone()) else {
         return;
     };
     state.borrow_mut().download = None;
     ui.set_update_downloading(false);
+    ui.set_update_installing(false);
     ui.set_update_progress(0.0);
     match result {
-        Ok(path) => {
+        Ok((target, installed)) => {
             ui.set_update_ready(true);
+            ui.set_update_restart_deferred(false);
+            ui.set_update_notice(false);
             ui.set_update_error(false);
             ui.set_update_download_failed(false);
-            ui.set_update_status(ready_steps(&release, &path, &target).into());
-            state.borrow_mut().staged = Some(Staged {
+            ui.set_update_status(installed_message(&release, &target, &installed).into());
+            state.borrow_mut().installed = Some(Update {
                 version: release.version,
-                path,
-                target,
+                selected: target.selected,
             });
         }
         Err(updater::Error::Cancelled) => {
@@ -356,7 +495,7 @@ fn finish_download(
             ui.set_update_download_failed(false);
             ui.set_update_status(
                 format!(
-                    "The download was cancelled. Esquie {} is still available.",
+                    "The update was cancelled. Your current copy is unchanged, and Esquie {} is still available.",
                     release.version
                 )
                 .into(),
@@ -370,14 +509,17 @@ fn finish_download(
     }
 }
 
-/// Until Esquie replaces itself, the verified file waits beside the target.
-fn ready_steps(release: &Release, path: &Path, target: &Path) -> String {
+fn installed_message(release: &Release, target: &Target, installed: &Installed) -> String {
+    let backup = installed.backup.as_ref().map_or_else(String::new, |b| {
+        format!(" The previous version is kept at {}.", b.display())
+    });
     format!(
-        "Esquie {} was downloaded and matches its signed checksum. Current audio keeps running. \
-         To finish, quit Esquie, replace {} with {} (keep the same name), then start Esquie again.",
+        "Esquie {} is installed at {}. This session keeps running the current version until you \
+         restart. Restarting briefly interrupts the virtual microphone; Later keeps it running, \
+         and Esquie {} starts next time.{backup}",
         release.version,
-        target.display(),
-        path.display()
+        target.selected.display(),
+        release.version,
     )
 }
 
@@ -392,24 +534,16 @@ fn apply(ui: &AppWindow, report: Report) {
     if report.explicit {
         ui.set_update_checking(false);
     }
-    // A download in progress owns the status line; so does a staged update
-    // while the check still offers that same version.
+    // An update in progress owns the status line; so does an installed update
+    // awaiting restart, which no later check can undo.
     {
         let st = state.borrow();
-        let same_staged = matches!(
-            (&report.result, &st.staged),
-            (Ok(Outcome::Available(r)), Some(s)) if r.version == s.version
-        );
-        if st.download.is_some() || same_staged {
+        if st.download.is_some() || st.installed.is_some() {
             return;
         }
     }
-    // A different outcome supersedes a staged or failed download; a failed
-    // check does not.
+    // A different outcome supersedes a failed download; a failed check does not.
     if report.result.is_ok() {
-        if state.borrow_mut().staged.take().is_some() {
-            ui.set_update_ready(false);
-        }
         ui.set_update_download_failed(false);
     }
     match report.result {

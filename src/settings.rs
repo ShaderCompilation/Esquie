@@ -1,6 +1,32 @@
 //! Tiny key=value settings file at ~/.config/esquie/settings.
+//!
+//! Keys this version does not know are written back unchanged, so running an
+//! older Esquie (for example a restored backup) never silently drops a newer
+//! version's settings. Each save records the writing version in `written_by`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Keys this version reads; any other `key=value` line is preserved verbatim.
+const KNOWN: &[&str] = &[
+    "mic",
+    "enabled",
+    "strength",
+    "extra_cleanup",
+    "gate",
+    "setup_complete",
+    "install_prompt",
+    "install_directory",
+    "installed_path",
+    "automatic_checks",
+    "last_check_attempt",
+    "skipped_version",
+    "window_size",
+    "written_by",
+];
+
+/// The first save over a newer version's settings keeps a copy of them once.
+static NEWER_COPIED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 pub struct Settings {
@@ -19,6 +45,10 @@ pub struct Settings {
     pub skipped_version: Option<String>,
     // Restored window size (width, height) in logical pixels.
     pub window_size: Option<(u32, u32)>,
+    /// The Esquie version that last saved the file, if recorded.
+    pub written_by: Option<String>,
+    /// Lines with keys this version does not know, in their original order.
+    unknown: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,6 +75,8 @@ impl Default for Settings {
             last_check_attempt: None,
             skipped_version: None,
             window_size: None,
+            written_by: None,
+            unknown: Vec::new(),
         }
     }
 }
@@ -109,10 +141,27 @@ impl Settings {
                             _ => None,
                         })
                 }
+                Some(("written_by", v)) if !v.is_empty() => s.written_by = Some(v.to_string()),
+                Some((key, _)) if !key.is_empty() && !KNOWN.contains(&key) => {
+                    s.unknown.push(line.to_string())
+                }
                 _ => {}
             }
         }
         s
+    }
+
+    /// The newer version that last saved these settings, if any. Its settings
+    /// may mean something this version does not understand.
+    pub fn written_by_newer(&self) -> Option<semver::Version> {
+        let writer = semver::Version::parse(self.written_by.as_deref()?).ok()?;
+        let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+        (writer > current).then_some(writer)
+    }
+
+    /// Where the first save in an older version keeps the newer version's file.
+    pub fn newer_copy_path(version: &semver::Version) -> Option<PathBuf> {
+        path().map(|p| p.with_file_name(format!("settings.saved-by-{version}")))
     }
 
     pub fn save(&self) {
@@ -124,6 +173,12 @@ impl Settings {
     pub fn try_save(&self) -> std::io::Result<()> {
         let p =
             path().ok_or_else(|| std::io::Error::other("No settings directory is available"))?;
+        if let Some(newer) = self.written_by_newer()
+            && !NEWER_COPIED.swap(true, Ordering::Relaxed)
+            && let Some(copy) = Self::newer_copy_path(&newer)
+        {
+            keep_newer_copy(&p, &copy, &newer);
+        }
         crate::file_ops::write(&p, self.serialize().as_bytes(), 0o600)
     }
 
@@ -170,7 +225,30 @@ impl Settings {
         if let Some((w, h)) = self.window_size {
             text.push_str(&format!("window_size={w} {h}\n"));
         }
+        text.push_str(&format!("written_by={}\n", env!("CARGO_PKG_VERSION")));
+        for line in &self.unknown {
+            text.push_str(line);
+            text.push('\n');
+        }
         text
+    }
+}
+
+/// Keep the newer version's settings file before this older version first
+/// rewrites it. An existing copy is never overwritten.
+fn keep_newer_copy(settings: &Path, copy: &Path, newer: &semver::Version) {
+    if copy.exists() {
+        return;
+    }
+    match std::fs::read(settings) {
+        Ok(bytes) => match crate::file_ops::write(copy, &bytes, 0o600) {
+            Ok(()) => tracing::info!(
+                "settings were saved by Esquie {newer}; kept a copy at {}",
+                copy.display()
+            ),
+            Err(e) => tracing::warn!("could not keep a copy of Esquie {newer}'s settings: {e}"),
+        },
+        Err(e) => tracing::warn!("could not read Esquie {newer}'s settings to copy them: {e}"),
     }
 }
 
@@ -258,6 +336,54 @@ mod tests {
             Settings::parse("window_size=420 740").window_size,
             Some((480, 740))
         );
+    }
+
+    #[test]
+    fn newer_settings_survive_an_older_version() {
+        let text =
+            "mic=usb\nwritten_by=99.0.0\nfuture_key=\"kept = exactly\"\nstrength=40\nnew_mode=3\n";
+        let s = Settings::parse(text);
+        assert_eq!(s.written_by_newer(), Some(semver::Version::new(99, 0, 0)));
+        let saved = s.serialize();
+        assert!(
+            saved.contains("future_key=\"kept = exactly\"\nnew_mode=3\n"),
+            "{saved}"
+        );
+        assert!(saved.contains(concat!("written_by=", env!("CARGO_PKG_VERSION"), "\n")));
+        let reloaded = Settings::parse(&saved);
+        assert!(reloaded.written_by_newer().is_none());
+        assert_eq!(reloaded.serialize(), saved, "stable across saves");
+        // Known keys, even with values this version rejects, are not duplicated.
+        let s = Settings::parse("install_prompt=ask\nmic=\n");
+        assert!(s.unknown.is_empty());
+        assert!(
+            Settings::parse("written_by=0.0.1")
+                .written_by_newer()
+                .is_none()
+        );
+        assert!(
+            Settings::parse("written_by=nonsense")
+                .written_by_newer()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_newer_settings_file_is_copied_once_before_it_is_rewritten() {
+        let dir = std::env::temp_dir().join(format!("esquie-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        let copy = dir.join("settings.saved-by-99.0.0");
+        std::fs::write(&settings, "written_by=99.0.0\n").unwrap();
+        let newer = semver::Version::new(99, 0, 0);
+        keep_newer_copy(&settings, &copy, &newer);
+        std::fs::write(&settings, "rewritten\n").unwrap();
+        keep_newer_copy(&settings, &copy, &newer);
+        assert_eq!(
+            std::fs::read_to_string(&copy).unwrap(),
+            "written_by=99.0.0\n"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

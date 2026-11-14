@@ -453,7 +453,9 @@ export component AppWindow inherits Window {
     in property <bool> update-downloading;     // a download job is running
     in property <float> update-progress;       // 0..1 while downloading
     in property <bool> update-download-failed; // Update becomes Retry update
-    in property <bool> update-ready;           // verified and staged beside the target
+    in property <bool> update-installing;      // replacing the selected copy
+    in property <bool> update-ready;           // installed; awaiting Restart now
+    in-out property <bool> update-restart-deferred; // Later was chosen
     // Installation and update jobs are serialized.
     property <bool> jobs-busy: root.installation-busy || root.update-downloading;
     in property <string> app-version;
@@ -470,6 +472,7 @@ export component AppWindow inherits Window {
     callback check-updates();
     callback start-update();
     callback cancel-update();
+    callback restart-update();
     callback open-release-notes();
     callback dismiss-update-notice();
 
@@ -739,6 +742,15 @@ export component AppWindow inherits Window {
                             Button { text: "Later"; clicked => { root.dismiss-update-notice(); } }
                         }
                     }
+                    if root.microphone-view && root.update-ready && !root.update-restart-deferred: Card {
+                        title: "Restart to finish updating";
+                        subtitle: "Esquie " + root.update-version + " is installed. Restarting briefly interrupts the virtual microphone; with Later, this session keeps running and the new version starts next time.";
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button { text: "Restart now"; primary: true; clicked => { root.restart-update(); } }
+                            Button { text: "Later"; clicked => { root.update-restart-deferred = true; } }
+                        }
+                    }
                     if root.settings-open: Card {
                         title: "Startup";
                         OptionRow {
@@ -832,7 +844,7 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             Button {
                                 text: root.update-checking ? "Checking…" : root.update-error && !root.update-download-failed ? "Retry" : "Check now";
-                                enabled: !root.update-checking && !root.update-downloading;
+                                enabled: !root.update-checking && !root.update-downloading && !root.update-ready;
                                 clicked => { root.check-updates(); }
                             }
                             if root.update-version != "" && root.update-installable && !root.update-downloading && !root.update-ready: Button {
@@ -841,9 +853,18 @@ export component AppWindow inherits Window {
                                 enabled: !root.installation-busy;
                                 clicked => { root.start-update(); }
                             }
-                            if root.update-downloading: Button {
+                            if root.update-downloading && !root.update-installing: Button {
                                 text: "Cancel download";
                                 clicked => { root.cancel-update(); }
+                            }
+                            if root.update-ready: Button {
+                                text: "Restart now";
+                                primary: true;
+                                clicked => { root.restart-update(); }
+                            }
+                            if root.update-ready && !root.update-restart-deferred: Button {
+                                text: "Later";
+                                clicked => { root.update-restart-deferred = true; }
                             }
                             if root.update-version != "": Button {
                                 text: "Release notes";

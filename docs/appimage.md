@@ -104,31 +104,96 @@ most once a day. This is its only network access; microphone audio is never
 sent anywhere. Turn it off under **Settings → About and updates → Check for
 updates automatically**; **Check now** works either way. A newer release is
 announced only when its AppImage, checksum file, and a valid signature of
-that checksum by the release key are published. **Update**
-opens that AppImage's download in your browser; Esquie does not replace itself
-yet. Source builds and extracted copies get instructions instead of **Update**.
+that checksum by the release key are published. Source builds and extracted
+copies get instructions instead of **Update**.
 
-Installing the update is manual:
+**Update** replaces the selected copy: the installed copy after **Install a
+copy**, otherwise the AppImage you started. It never touches a different file,
+such as the original download after you installed a copy. Esquie:
+
+1. records the selected file's identity and SHA-256, following a symlink to
+   the file it points at;
+2. downloads the new AppImage into a hidden `.esquie-update-<version>.part` file
+   in the same directory, and checks its size and signed SHA-256 (audio keeps
+   running, and **Cancel download** stops it);
+3. checks again that the selected file is unchanged, and stops without
+   replacing anything if another tool updated or moved it;
+4. gives the new file the old one's permissions, keeps the old file as
+   `.<name>.previous` beside it, and renames the new file into place. The
+   path and file name stay the same, so launchers, the icon, Start on login,
+   and settings keep working unchanged.
+
+The path always holds either the complete old AppImage or the complete new one.
+Only the most recent previous version is kept; each update replaces the backup.
+No administrator access is needed, but you must be able to write to the
+directory holding the copy. If you cannot, if the disk is full, or if the
+download or verification fails, Esquie says so, removes its partial file, and
+leaves your current copy unchanged. **Retry update** starts again from the
+beginning; partial downloads are not resumed.
+
+The running session keeps using the old version. **Restart now** saves your
+settings, stops audio, and starts the new version from the same path; the
+virtual microphone disappears for a few seconds and apps using it may need to
+reselect it. **Later** keeps the current session running until you quit; the
+next start uses the new version. Quitting during an update cancels the
+download; a replacement that has already started is allowed to finish first.
+
+If Esquie stops during an update (a crash or power loss), the next start removes
+leftover `.esquie-update-*` files beside the selected copy and finishes keeping
+the backup. If you later selected a copy in another directory, delete leftover
+`.esquie-update-*` files there yourself.
+
+### Going back to the previous version
+
+Esquie does not roll back automatically. To restore the backup by hand:
 
 1. Quit Esquie from its tray menu (or close the window if there is no tray).
+2. In the directory of the updated copy, replace it with the backup, keeping
+   the same name. For the default installation:
+
+   ```sh
+   cd ~/.local/bin
+   mv .esquie.previous esquie
+   ```
+
+   For an AppImage named `Esquie-0.2.0-x86_64.AppImage`, the backup is
+   `.Esquie-0.2.0-x86_64.AppImage.previous`. File names are not renamed
+   during updates, so the name can show an older version than the contents.
+   `./<file> --version` prints the real version.
+3. Start Esquie again.
+
+Settings in `~/.config/esquie/settings` are kept across versions in both
+directions. An older version keeps settings it does not recognize, unchanged.
+When it finds settings saved by a newer version, it says so in **About and
+updates**. Before it first changes anything, it copies the file to
+`settings.saved-by-<newer version>`. To go back to exactly those settings after
+updating again, quit Esquie and copy that file over `settings`. (Versions from
+before the updater replaced its own file did not keep unrecognized settings.)
+
+### Updating copies you replace yourself
+
+You can still update by hand, for example an extracted copy or one in a
+directory you cannot write to:
+
+1. Quit Esquie.
 2. Download the new AppImage, `.sha256`, and `.sha256.minisig`, and verify
    them as above.
 3. Make it executable and start it. If it replaces the old file at the same
-   path, nothing else changes. If the file name or directory differs (new
-   versions have new names), use **Add launcher without moving the app** from
-   the new copy to select its path and refresh owned integration. If you used
-   **Install a copy**, install the new version into the same directory and
-   confirm replacement instead.
-4. Delete the old AppImage.
+   path, nothing else changes. If the file name or directory differs, use
+   **Add launcher without moving the app** from the new copy to select its path
+   and refresh owned integration. If you used **Install a copy**, install the
+   new version into the same directory and confirm replacement instead.
 
-Settings in `~/.config/esquie/settings` are kept across versions.
+Versions 0.1.0 and 0.1.1 cannot find signed updates, so updating from them is
+always manual, once.
 
 ## Removing
 
 Turn off **Start on login** (or delete `~/.config/autostart/esquie.desktop`),
 use **Settings → Remove launcher**, then quit Esquie. Delete the installed
-`~/.local/bin/esquie` (or your chosen copy) and the original download if no
-longer needed. Remove external integration through its manager. Delete
+`~/.local/bin/esquie` (or your chosen copy), its `.esquie.previous` backup
+(`.<name>.previous` for other names), and the original download if no longer
+needed. Remove external integration through its manager. Delete
 `~/.config/esquie` to remove settings. With custom XDG directories, use the
 corresponding config/data paths.
 
