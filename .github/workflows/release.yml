@@ -22,25 +22,25 @@ jobs:
           docker pull --platform linux/amd64 ubuntu:24.04
           echo "digest=$(docker image inspect --format '{{index .RepoDigests 0}}' ubuntu:24.04)" >> "$GITHUB_OUTPUT"
       - name: Restore Cargo downloads
-        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: ${{ runner.temp }}/esquie-cache/cargo
           key: cargo-downloads-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-downloads-
       - name: Restore pinned Rust toolchain
-        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: ${{ runner.temp }}/esquie-cache/rustup
           key: rust-toolchain-${{ hashFiles('rust-toolchain.toml') }}
       - name: Restore AppImage build artifacts
-        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: target/appimage-build
           key: appimage-build-${{ steps.image.outputs.digest }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             appimage-build-${{ steps.image.outputs.digest }}-
       - name: Restore pinned cargo-about
-        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: target/license-tools
           key: cargo-about-0.9.3
