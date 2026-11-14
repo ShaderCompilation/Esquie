@@ -86,7 +86,7 @@ SLINT_BACKEND=winit-software ./target/release/esquie
 
 This still requires a graphical desktop and PipeWire for normal operation.
 `./target/release/esquie --version` is the early-exit exception: it prints
-`esquie 0.1.0` (from Cargo package metadata) without loading settings or
+`esquie 0.1.1` (from Cargo package metadata) without loading settings or
 initializing the display, tray, D-Bus, or audio engine. Installed shared
 libraries are still required by the executable's dynamic loader.
 
