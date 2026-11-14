@@ -14,8 +14,10 @@ case "$ID" in
 esac
 
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/esquie-rustup-init.sh
+# CARGO_HOME/RUSTUP_HOME may point at mounted CI cache volumes.
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 sh /tmp/esquie-rustup-init.sh -y --profile minimal --default-toolchain none
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$CARGO_HOME/bin:$PATH"
 # Baseline x86_64, including when the runner itself supports newer instructions.
 export RUSTFLAGS="-C target-cpu=x86-64"
 rustc -Vv > target/validation/rustc.txt

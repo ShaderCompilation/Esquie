@@ -35,8 +35,10 @@ grep -v '^#' "$here/tools.sha256" | (cd "$work/tools" && sha256sum --check --str
 cp "$here/tools.sha256" "$out/evidence/tools.sha256"
 chmod +x "$work/tools/"*
 
+# CARGO_HOME/RUSTUP_HOME may point at mounted CI cache volumes.
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 "$work/tools/rustup-init" -y --no-modify-path --profile minimal --default-toolchain none
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$CARGO_HOME/bin:$PATH"
 export RUSTFLAGS="-C target-cpu=x86-64"
 # Kept apart from target/release, which may hold host-built artifacts whose
 # PipeWire bindings and linked libraries came from a different distro.

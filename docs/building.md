@@ -1,8 +1,10 @@
 # Building and checking Esquie on Linux
 
-The initial x86_64 matrix is Ubuntu 24.04 and 26.04 LTS, Debian 13, Fedora 44
-and 45, and current Arch Linux. These are CI targets; a configured job is not
-evidence that the distro or a real desktop session has passed validation.
+CI builds and tests on Ubuntu 24.04 and current Arch Linux. The dependency
+installer below also supports Ubuntu 26.04, Debian 13, and Fedora 44/45 for
+local builds, but those distros are no longer CI targets. A passing or
+configured job is not evidence that a distro or a real desktop session has
+passed validation.
 
 ## Toolchain and dependency resolution
 
@@ -90,7 +92,12 @@ libraries are still required by the executable's dynamic loader.
 
 ## Automated checks and local CI reproduction
 
-The workflow runs independent clean-container jobs for all six matrix entries.
+The workflow runs independent fresh-container jobs for both matrix entries
+(Ubuntu 24.04 and Arch Linux). Jobs restore GitHub Actions caches of the
+pinned Rust toolchain, Cargo downloads, and per-distro build artifacts; the
+distro containers themselves are always fresh, so native dependencies are
+installed and the checks run from scratch in each image.
+
 Each job installs native dependencies, installs the pinned Rust compiler, runs
 a locked release build, runs the existing automated tests plus the headless
 version regression test, the tray availability regression on a private D-Bus
@@ -118,15 +125,16 @@ docker pull --platform linux/amd64 ubuntu:24.04
 image_digest=$(docker image inspect --format '{{index .RepoDigests 0}}' ubuntu:24.04)
 # Use a fresh checkout for each distro.
 docker run --rm --platform linux/amd64 \
-  --env CARGO_BUILD_JOBS=2 \
+  --env CARGO_BUILD_JOBS=4 \
   --volume "$PWD:/workspace" --workdir /workspace \
   "$image_digest" bash ci/container-build.sh
 ```
 
 On an SELinux host, add `:Z` to the volume mount for a dedicated checkout.
-Other matrix image tags are `ubuntu:26.04`, `debian:13`, `fedora:44`,
-`fedora:45`, and `archlinux:base`. CI resolves each tag once and runs the
-resulting digest. Each job uploads `target/validation` with that image digest,
+The same snippet also runs with `ubuntu:26.04`, `debian:13`, `fedora:44`, and
+`fedora:45`; the installer supports them even though CI no longer tests them.
+Resolve each tag to a digest before use. CI jobs upload `target/validation`
+with that image digest,
 the installed package versions, compiler/Cargo versions, PipeWire header
 version, check log, lockfile, version output, and binary checksum.
 
@@ -202,7 +210,7 @@ Docker on the host (set `CONTAINER_ENGINE` to choose one):
 
 ```sh
 bash packaging/appimage/build.sh
-bash packaging/appimage/test.sh            # all six matrix images
+bash packaging/appimage/test.sh            # both CI matrix images
 bash packaging/appimage/test.sh fedora:45  # or selected images
 ```
 
@@ -258,22 +266,28 @@ Logs, package lists, PipeWire versions, and the loaded library paths are written
 to `target/appimage/test/<image>/`.
 
 GitHub Actions builds one AppImage candidate on Ubuntu 24.04, uploads it with
-its checksum and build evidence, and tests that same artifact in all six
-runtime-only containers. The aggregate **All automated release gates** job also
-requires the six source build/test jobs. Candidate uploads do not publish a
+its checksum and build evidence, and tests that same artifact in both
+runtime-only matrix containers on pushes to master, manual dispatches, and
+tagged releases; pull requests build the candidate but skip runtime testing.
+The aggregate **All automated release gates** job also requires both source
+build/test jobs. Candidate uploads do not publish a
 release. Automated results do not replace real desktop, microphone, Bluetooth,
 login, and suspend/resume testing.
 
 ### What CI prepares for a release
 
-The workflow runs on push, pull request, or manual dispatch. Its repository
+The workflow runs on pushes to master, pull requests, or manual dispatch;
+changes that touch only documentation skip the build, test, and packaging
+jobs, and the gates job reports success for them. Its repository
 permissions are read-only: it uploads review artifacts, but does not create a
 tag, publish a GitHub Release, or upload public release assets. A local build
 or test pass is separate from a passing Actions run for the release commit.
 
-The **All automated release gates** job requires all six source build/test
-jobs, the AppImage build and payload inspection, and all six runtime jobs to
-succeed. Failed, skipped, or cancelled dependencies prevent it from passing.
+The **All automated release gates** job requires both source build/test
+jobs, the AppImage build and payload inspection, and — except on pull
+requests — both runtime jobs to succeed. Failed or cancelled dependencies
+prevent it from passing; intentionally skipped jobs (documentation-only
+changes, runtime tests on pull requests) do not.
 
 Packaging generates dependency license reports with pinned `cargo-about`,
 checks reviewed license-input checksums and required copyright supplements,

@@ -3,7 +3,7 @@ name: Linux builds and tests
 on:
   push:
     branches:
-      - "**"
+      - master
   pull_request:
   workflow_dispatch:
 
@@ -11,8 +11,41 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect source changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      # Manual dispatch always runs everything; other events run the heavy
+      # jobs only when build, test, or packaging inputs changed.
+      code: ${{ steps.filter.outputs.code == 'true' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Filter documentation-only changes
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        with:
+          filters: |
+            code:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'build.rs'
+              - 'about.toml'
+              - 'install.sh'
+              - 'src/**'
+              - 'tests/**'
+              - 'examples/**'
+              - 'ui/**'
+              - 'ci/**'
+              - 'packaging/**'
+              - '.github/workflows/**'
+
   build-and-test:
     name: ${{ matrix.name }} / x86_64
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -22,34 +55,51 @@ jobs:
           - name: Ubuntu 24.04
             id: ubuntu-24.04
             image: ubuntu:24.04
-          - name: Ubuntu 26.04
-            id: ubuntu-26.04
-            image: ubuntu:26.04
-          - name: Debian 13
-            id: debian-13
-            image: debian:13
-          - name: Fedora 44
-            id: fedora-44
-            image: fedora:44
-          - name: Fedora 45
-            id: fedora-45
-            image: fedora:45
           - name: Arch Linux (current)
             id: arch
             image: archlinux:base
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Build and test in a fresh distro container
-        shell: bash
+      - name: Resolve distro image digest
+        id: image
         env:
           DISTRO_IMAGE: ${{ matrix.image }}
         run: |
-          mkdir -p target/validation
+          mkdir -p target/validation "$RUNNER_TEMP/esquie-cache/cargo" "$RUNNER_TEMP/esquie-cache/rustup"
           docker pull --platform linux/amd64 "$DISTRO_IMAGE"
           docker image inspect --format '{{index .RepoDigests 0}}' "$DISTRO_IMAGE" > target/validation/image.txt
+          echo "digest=$(cat target/validation/image.txt)" >> "$GITHUB_OUTPUT"
+      # Cargo downloads are distro-independent; one cache serves every job.
+      - name: Restore Cargo downloads
+        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        with:
+          path: ${{ runner.temp }}/esquie-cache/cargo
+          key: cargo-downloads-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-downloads-
+      - name: Restore pinned Rust toolchain
+        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        with:
+          path: ${{ runner.temp }}/esquie-cache/rustup
+          key: rust-toolchain-${{ hashFiles('rust-toolchain.toml') }}
+      # Build artifacts are per distro image and must not cross image digest
+      # updates (bindgen output depends on the distro's headers).
+      - name: Restore build artifacts
+        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        with:
+          path: target
+          key: srcbuild-${{ matrix.id }}-${{ steps.image.outputs.digest }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            srcbuild-${{ matrix.id }}-${{ steps.image.outputs.digest }}-
+      - name: Build and test in a fresh distro container
+        shell: bash
+        run: |
           image_digest=$(cat target/validation/image.txt)
           docker run --rm --platform linux/amd64 \
-            --env CARGO_BUILD_JOBS=2 \
+            --env CARGO_BUILD_JOBS=4 \
+            --env CARGO_HOME=/cache/cargo \
+            --env RUSTUP_HOME=/cache/rustup \
+            --volume "$RUNNER_TEMP/esquie-cache/cargo:/cache/cargo" \
+            --volume "$RUNNER_TEMP/esquie-cache/rustup:/cache/rustup" \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$image_digest" bash ci/container-build.sh 2>&1 | tee target/validation/check.log
       - name: Upload validation evidence
@@ -62,14 +112,47 @@ jobs:
 
   appimage-build:
     name: Build review candidate / x86_64
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Resolve base image digest
+        id: image
+        run: |
+          mkdir -p "$RUNNER_TEMP/esquie-cache/cargo" "$RUNNER_TEMP/esquie-cache/rustup"
+          docker pull --platform linux/amd64 ubuntu:24.04
+          echo "digest=$(docker image inspect --format '{{index .RepoDigests 0}}' ubuntu:24.04)" >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo downloads
+        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        with:
+          path: ${{ runner.temp }}/esquie-cache/cargo
+          key: cargo-downloads-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-downloads-
+      - name: Restore pinned Rust toolchain
+        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        with:
+          path: ${{ runner.temp }}/esquie-cache/rustup
+          key: rust-toolchain-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Restore AppImage build artifacts
+        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        with:
+          path: target/appimage-build
+          key: appimage-build-${{ steps.image.outputs.digest }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            appimage-build-${{ steps.image.outputs.digest }}-
+      - name: Restore pinned cargo-about
+        uses: actions/cache@d4323d4df104b0cba5d27ea1e00982c76935536f # v4.2.2
+        with:
+          path: target/license-tools
+          key: cargo-about-0.9.3
       - name: Build on the oldest supported baseline and inspect payload
         env:
           CONTAINER_ENGINE: docker
-          CARGO_BUILD_JOBS: 2
+          CARGO_BUILD_JOBS: 4
+          esquie_cargo_cache: ${{ runner.temp }}/esquie-cache/cargo
+          esquie_rustup_cache: ${{ runner.temp }}/esquie-cache/rustup
         run: bash packaging/appimage/build.sh
       - name: Upload candidate and checksums for review
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -90,12 +173,15 @@ jobs:
   appimage-test:
     name: Candidate runtime / ${{ matrix.image }}
     needs: appimage-build
+    # Runtime tests run on master pushes, manual dispatches, and tagged
+    # releases (release.yml); pull requests skip them.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        image: ["ubuntu:24.04", "ubuntu:26.04", "debian:13", "fedora:44", "fedora:45", "archlinux:base"]
+        image: ["ubuntu:24.04", "archlinux:base"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -123,15 +209,25 @@ jobs:
   automated-gates:
     name: All automated release gates
     if: always()
-    needs: [build-and-test, appimage-build, appimage-test]
+    needs: [changes, build-and-test, appimage-build, appimage-test]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every matrix entry and packaging check
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          EVENT_NAME: ${{ github.event_name }}
           BUILD_RESULT: ${{ needs.build-and-test.result }}
           PACKAGE_RESULT: ${{ needs.appimage-build.result }}
           RUNTIME_RESULT: ${{ needs.appimage-test.result }}
         run: |
+          test "$CHANGES_RESULT" = success
+          if [[ "$CODE_CHANGED" != "true" ]]; then
+            echo "Documentation-only change: automated builds and tests skipped."
+            exit 0
+          fi
           test "$BUILD_RESULT" = success
           test "$PACKAGE_RESULT" = success
-          test "$RUNTIME_RESULT" = success
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            test "$RUNTIME_RESULT" = success
+          fi

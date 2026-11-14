@@ -65,7 +65,7 @@ You can add Esquie to your application menu or install a per-user copy from
 - [Report a bug or request a feature](https://github.com/ShaderCompilation/Esquie/issues).
 
 Compatibility depends on your desktop and audio setup. The configured CI matrix
-covers Ubuntu, Debian, Fedora, and Arch Linux. I manually checked on Fedora GNOME, Fedora KDE, Ubuntu GNOME,
+covers Ubuntu and Arch Linux. I manually checked on Fedora GNOME, Fedora KDE, Ubuntu GNOME,
 CachyOS COSMIC, and Linux Mint.
 If you encounter a problem, include your Esquie version and setup, and describe what you tried.
 Please if possible also export your logs from settings and include with the report.

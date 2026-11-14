@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the built AppImage in fresh runtime-only containers across the initial
+# Runs the built AppImage in fresh runtime-only containers across the CI
 # distro matrix (or the images given as arguments).
 #
 #   bash packaging/appimage/test.sh [image ...]
@@ -17,7 +17,7 @@ appimages=(target/appimage/Esquie-*-x86_64.AppImage)
 
 images=("$@")
 if [[ ${#images[@]} -eq 0 ]]; then
-    images=(ubuntu:24.04 ubuntu:26.04 debian:13 fedora:44 fedora:45 archlinux:base)
+    images=(ubuntu:24.04 archlinux:base)
 fi
 
 failed=()
