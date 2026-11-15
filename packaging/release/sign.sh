@@ -25,12 +25,16 @@ for tool in gh minisign sha256sum; do
 done
 [[ -r $secret_key ]] || { echo "Secret key not found: $secret_key" >&2; exit 1; }
 
-draft=$(gh release view "$tag" --json isDraft --jq .isDraft)
+# Resolve the repository from the script's own checkout so the gh calls below
+# keep working from any directory, including the temporary one used later.
+repo=$(cd "$here" && gh repo view --json nameWithOwner --jq .nameWithOwner)
+
+draft=$(gh release view -R "$repo" "$tag" --json isDraft --jq .isDraft)
 [[ $draft == true ]] || { echo "$tag is not a draft release; refusing to re-sign it." >&2; exit 1; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-gh release download "$tag" --dir "$work" --pattern "$appimage" --pattern "$checksum"
+gh release download -R "$repo" "$tag" --dir "$work" --pattern "$appimage" --pattern "$checksum"
 cd "$work"
 
 # The signature vouches for these exact bytes, so check them before signing.
@@ -40,11 +44,11 @@ minisign -V -p "$public_key" -m "$checksum"
 
 echo
 echo "Signed $checksum for $tag."
-gh release upload "$tag" "$checksum.minisig"
+gh release upload -R "$repo" "$tag" "$checksum.minisig"
 read -r -p "Publish $tag now? Esquie installs will be offered this update. [y/N] " answer
 if [[ $answer == [yY] ]]; then
-    gh release edit "$tag" --draft=false --latest
+    gh release edit -R "$repo" "$tag" --draft=false --latest
     echo "Published $tag."
 else
-    echo "Left $tag as a signed draft. Publish later with: gh release edit $tag --draft=false --latest"
+    echo "Left $tag as a signed draft. Publish later with: gh release edit -R $repo $tag --draft=false --latest"
 fi
