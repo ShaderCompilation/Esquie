@@ -156,8 +156,8 @@ Esquie does not roll back automatically. To restore the backup by hand:
    mv .esquie.previous esquie
    ```
 
-   For an AppImage named `Esquie-0.2.0-x86_64.AppImage`, the backup is
-   `.Esquie-0.2.0-x86_64.AppImage.previous`. File names are not renamed
+   For an AppImage named `Esquie-0.3.0-x86_64.AppImage`, the backup is
+   `.Esquie-0.3.0-x86_64.AppImage.previous`. File names are not renamed
    during updates, so the name can show an older version than the contents.
    `./<file> --version` prints the real version.
 3. Start Esquie again.
@@ -218,7 +218,7 @@ command-line helper is needed, not libfuse 2):
 unpacks itself to a temporary directory for that run and cleans up afterwards:
 
 ```sh
-APPIMAGE_EXTRACT_AND_RUN=1 ./Esquie-0.2.0-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Esquie-0.3.0-x86_64.AppImage
 ```
 
 Start on login launches the AppImage without that variable, so it still needs
@@ -228,7 +228,7 @@ FUSE. Use extraction instead if FUSE cannot be installed.
 
 ```sh
 mkdir -p ~/Applications && cd ~/Applications
-/path/to/Esquie-0.2.0-x86_64.AppImage --appimage-extract
+/path/to/Esquie-0.3.0-x86_64.AppImage --appimage-extract
 mv squashfs-root Esquie
 ~/Applications/Esquie/AppRun
 ```
