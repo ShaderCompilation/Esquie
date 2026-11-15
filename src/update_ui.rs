@@ -177,10 +177,12 @@ pub fn setup(
                 Some(Ok(())) => {
                     ui.set_update_checking(true);
                     ui.set_update_error(false);
+                    ui.set_update_success(false);
                     ui.set_update_status("Checking GitHub for updates…".into());
                 }
                 _ => {
                     ui.set_update_error(true);
+                    ui.set_update_success(false);
                     ui.set_update_status("Update checks are unavailable in this session.".into());
                 }
             }
@@ -197,6 +199,7 @@ pub fn setup(
                 && let Some(ui) = weak.upgrade()
             {
                 ui.set_update_error(true);
+                ui.set_update_success(false);
                 ui.set_update_status(format!("Could not save this preference: {e}").into());
             }
             drop(s);
@@ -218,6 +221,7 @@ pub fn setup(
                 && let Some(ui) = weak.upgrade()
             {
                 ui.set_update_error(true);
+                ui.set_update_success(false);
                 ui.set_update_status(
                     format!("Could not open your browser ({e}). Visit {page} instead.").into(),
                 );
@@ -234,6 +238,7 @@ pub fn setup(
             ui.set_settings_open(true);
             if let Err(message) = start_download(&ui, &state, &settings, &jobs) {
                 ui.set_update_error(true);
+                ui.set_update_success(false);
                 ui.set_update_download_failed(true);
                 ui.set_update_status(message.into());
             }
@@ -263,6 +268,7 @@ pub fn setup(
             let Some(update) = &st.installed else { return };
             if !update.selected.is_file() {
                 ui.set_update_error(true);
+                ui.set_update_success(false);
                 ui.set_update_status(
                     format!(
                         "{} is missing, so Esquie cannot restart into it. Start Esquie again from your menu.",
@@ -363,6 +369,7 @@ fn start_download(
     ui.set_update_installing(false);
     ui.set_update_ready(false);
     ui.set_update_error(false);
+    ui.set_update_success(false);
     ui.set_update_download_failed(false);
     show_progress(ui, &release.version, 0, release.appimage.size);
     Ok(())
@@ -483,6 +490,7 @@ fn finish_update(
             ui.set_update_restart_deferred(false);
             ui.set_update_notice(false);
             ui.set_update_error(false);
+            ui.set_update_success(false);
             ui.set_update_download_failed(false);
             ui.set_update_status(installed_message(&release, &target, &installed).into());
             state.borrow_mut().installed = Some(Update {
@@ -492,6 +500,7 @@ fn finish_update(
         }
         Err(updater::Error::Cancelled) => {
             ui.set_update_error(false);
+            ui.set_update_success(false);
             ui.set_update_download_failed(false);
             ui.set_update_status(
                 format!(
@@ -503,6 +512,7 @@ fn finish_update(
         }
         Err(e) => {
             ui.set_update_error(true);
+            ui.set_update_success(false);
             ui.set_update_download_failed(true);
             ui.set_update_status(format!("{e} Your current copy is unchanged.").into());
         }
@@ -552,6 +562,7 @@ fn apply(ui: &AppWindow, report: Report) {
             ui.set_update_version("".into());
             ui.set_update_notice(false);
             ui.set_update_error(false);
+            ui.set_update_success(true);
             ui.set_update_status(
                 format!("Esquie {} is up to date.", env!("CARGO_PKG_VERSION")).into(),
             );
@@ -563,6 +574,7 @@ fn apply(ui: &AppWindow, report: Report) {
             ui.set_update_instructions(instructions.into());
             ui.set_update_version(version.as_str().into());
             ui.set_update_error(false);
+            ui.set_update_success(false);
             ui.set_update_status(format!("Esquie {version} is available.").into());
             let dismissed = state.borrow().dismissed.as_ref() == Some(&release.version);
             ui.set_update_notice(!dismissed);
@@ -571,6 +583,7 @@ fn apply(ui: &AppWindow, report: Report) {
         // Background failures stay quiet; the updater thread already logged them.
         Err(e) if report.explicit => {
             ui.set_update_error(true);
+            ui.set_update_success(false);
             ui.set_update_status(e.to_string().into());
         }
         Err(_) => {}

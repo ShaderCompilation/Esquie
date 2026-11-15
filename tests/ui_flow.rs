@@ -105,6 +105,24 @@ fn capture(ui: &AppWindow, name: &str) -> slint::SharedPixelBuffer<slint::Rgba8P
     pixels
 }
 
+/// Count pixels within a per-channel distance of a color, so a status line
+/// can be verified by its rendered tint despite font anti-aliasing.
+fn tinted_pixels(
+    pixels: &slint::SharedPixelBuffer<slint::Rgba8Pixel>,
+    [r, g, b]: [u8; 3],
+    tolerance: u8,
+) -> usize {
+    pixels
+        .as_slice()
+        .iter()
+        .filter(|p| {
+            p.r.abs_diff(r) <= tolerance
+                && p.g.abs_diff(g) <= tolerance
+                && p.b.abs_diff(b) <= tolerance
+        })
+        .count()
+}
+
 #[test]
 fn microphone_sound_check_and_settings_flow() {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
@@ -596,6 +614,24 @@ fn microphone_sound_check_and_settings_flow() {
     ui.set_update_status("Checking GitHub for updates…".into());
     capture(&ui, "16-update-settings-checking");
     ui.set_update_checking(false);
+
+    // An up-to-date check reports the outcome in the palette's good green.
+    ui.set_update_success(true);
+    ui.set_update_status("Esquie 0.2.0 is up to date.".into());
+    let current = capture(&ui, "16-update-settings-up-to-date");
+    assert!(
+        tinted_pixels(&current, [0x3d, 0xd5, 0x98], 32) >= 8,
+        "the up-to-date status must render green"
+    );
+    // Only that outcome tints the line; other statuses stay neutral.
+    ui.set_update_success(false);
+    ui.set_update_status("Esquie 0.2.0 is available.".into());
+    let available = capture(&ui, "16-update-settings-available");
+    assert_eq!(
+        tinted_pixels(&available, [0x3d, 0xd5, 0x98], 32),
+        0,
+        "a non-matching status must not render green"
+    );
 
     // A download in progress shows progress and Cancel, never a second Update.
     let cancels = Arc::new(Mutex::new(0));

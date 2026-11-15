@@ -445,6 +445,7 @@ export component AppWindow inherits Window {
     in-out property <bool> automatic-checks;
     in property <bool> update-checking;
     in property <bool> update-error;     // the last explicit check or update failed
+    in property <bool> update-success;   // the last check found this copy current
     in property <string> update-status;
     in property <string> update-version; // a verified newer release, or empty
     in property <bool> update-installable; // AppImage copies; others get instructions
@@ -834,7 +835,8 @@ export component AppWindow inherits Window {
                         }
                         if root.update-status != "": Text {
                             text: root.update-status;
-                            color: root.update-error ? Theme.warn : Theme.text;
+                            color: root.update-error ? Theme.warn
+                                : root.update-success ? Theme.good : Theme.text;
                             wrap: word-wrap;
                             height: self.preferred-height;
                         }
