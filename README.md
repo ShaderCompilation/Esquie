@@ -9,8 +9,9 @@ or other calling and recording apps. It creates a virtual microphone called
 **Esquie (noise removed)** that you select in your app's audio settings.
 
 Powered by [DeepFilterNet 3](https://github.com/Rikorose/DeepFilterNet), with the
-model built in. Audio is processed locally. It's fully private, nothing leaves your machine.
-The only network access is an optional daily update check against GitHub.
+model built in. Audio is processed locally and never leaves your machine. The
+only network access is an optional daily update check against GitHub and, when
+you choose to update, downloading the new release.
 
 ## Download
 
@@ -24,8 +25,9 @@ Standalone PulseAudio, ALSA-only, and JACK-only setups are not supported.
 No Rust or development packages are needed. See the
 [AppImage guide](docs/appimage.md#download-verify-and-run) for signature
 verification and full requirements, or [FUSE help](docs/appimage.md#fuse-troubleshooting)
-if the download will not open. Esquie can notify you about new releases;
-installing them is currently manual.
+if the download will not open. Esquie can check for new releases and install
+signed updates in place; versions 0.1.0 and 0.1.1 need one
+[manual update](docs/appimage.md#updating).
 
 ![Esquie workspace showing microphone selection, noise removal, cleanup presets, and sound check](docs/images/workspace.png)
 
@@ -53,7 +55,7 @@ You can add Esquie to your application menu or install a per-user copy from
   decide how much background sound to keep. Fine-tune sound offers a precise
   slider, extra cleanup, and quieter pauses.
 - **Hear the difference.** Record up to ten seconds and switch between Original
-  and Cleaned playback. You can also listen live, altough for this use headphones to avoid echo.
+  and Cleaned playback. You can also listen live; use headphones to avoid echo.
 - **Keep it handy.** With a supported system tray, closing the window keeps
   Esquie running. Without a tray, closing quits. Start on login is available
   in Settings; some compositors need their own startup configuration.
@@ -69,15 +71,16 @@ You can add Esquie to your application menu or install a per-user copy from
 Compatibility depends on your desktop and audio setup. The configured CI matrix
 covers Ubuntu and Arch Linux. I manually checked on Fedora GNOME, Fedora KDE, Ubuntu GNOME,
 CachyOS COSMIC, and Linux Mint.
-If you encounter a problem, include your Esquie version and setup, and describe what you tried.
-Please if possible also export your logs from settings and include with the report.
+If you encounter a problem, include your Esquie version and setup, and describe
+what you tried. If possible, export your logs from **Settings → Diagnostics**,
+review them, and attach them to the report.
 
 ## Contributing
 
 Bug reports, feature requests, and testing on different Linux desktops and
 microphones are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md).
-Before starting a code contribution, please open an issue first to see if the feature fits the vision.
-Your code might be merged without it as well, but it might also not depending if the fature is wanted.
+Before starting a code contribution, please open an issue to check that the
+change fits the project's direction.
 
 ## License
 
