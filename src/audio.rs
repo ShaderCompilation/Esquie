@@ -1711,7 +1711,6 @@ impl App {
         if let Err(e) = result {
             self.stop_preview();
             self.preview_error(Some(format!("Could not prepare cleaned playback: {e:#}")));
-            return;
         }
     }
 
@@ -1747,9 +1746,8 @@ impl App {
             let e = self.engine.borrow();
             (e.preview.mode, e.preview.finished)
         };
-        match (mode, finished) {
-            (PreviewMode::Recording | PreviewMode::Playing, true) => self.stop_preview(),
-            _ => {}
+        if finished && matches!(mode, PreviewMode::Recording | PreviewMode::Playing) {
+            self.stop_preview();
         }
     }
 
